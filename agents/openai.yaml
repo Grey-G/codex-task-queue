@@ -1,0 +1,3 @@
+display_name: Codex Task Queue
+short_description: Run small Codex tasks from project docs with Git commits.
+default_prompt: Use codex-task-queue to inspect this project, prepare executable product docs and a task queue if needed, then run the first ready task safely.
