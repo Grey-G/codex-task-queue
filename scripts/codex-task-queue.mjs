@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const COMMANDS = new Set(['doctor', 'init', 'next', 'run', 'history', 'help']);
 const DEFAULT_IGNORES = new Set([
   '.git',
@@ -25,6 +25,7 @@ function parseArgs(argv) {
   const args = {
     command: null,
     cwd: process.cwd(),
+    mode: process.env.CODEX_TASK_QUEUE_MODE || 'project',
     runner: process.env.CODEX_TASK_QUEUE_RUNNER || 'auto',
     max: null,
     untilBlocked: false,
@@ -48,6 +49,12 @@ function parseArgs(argv) {
       args.cwd = argv[++i] || args.cwd;
     } else if (arg.startsWith('--cwd=')) {
       args.cwd = arg.slice('--cwd='.length);
+    } else if (arg === '--mode') {
+      args.mode = argv[++i] || args.mode;
+    } else if (arg.startsWith('--mode=')) {
+      args.mode = arg.slice('--mode='.length);
+    } else if (arg === '--maintenance') {
+      args.mode = 'maintenance';
     } else if (arg === '--runner') {
       args.runner = argv[++i] || args.runner;
     } else if (arg.startsWith('--runner=')) {
@@ -94,7 +101,11 @@ function parseArgs(argv) {
 
   args.command = args.command || 'doctor';
   args.cwd = path.resolve(args.cwd);
+  args.mode = String(args.mode || 'project').toLowerCase();
 
+  if (!['project', 'maintenance'].includes(args.mode)) {
+    fail('Invalid --mode value. Expected project or maintenance.', 2);
+  }
   if (!['auto', 'app-server', 'exec'].includes(args.runner)) {
     fail('Invalid --runner value. Expected auto, app-server, or exec.', 2);
   }
@@ -108,13 +119,21 @@ function parseArgs(argv) {
   return args;
 }
 
-function pathsFor(root) {
+function queueFileNameFor(mode = 'project') {
+  return mode === 'maintenance' ? 'PATCH_QUEUE.md' : 'TASK_QUEUE.md';
+}
+
+function queueLabelFor(mode = 'project') {
+  return `docs/${queueFileNameFor(mode)}`;
+}
+
+function pathsFor(root, mode = 'project') {
   const docs = path.join(root, 'docs');
   return {
     root,
     docs,
     product: path.join(docs, 'PRODUCT.md'),
-    queue: path.join(docs, 'TASK_QUEUE.md'),
+    queue: path.join(docs, queueFileNameFor(mode)),
     runbook: path.join(docs, 'SESSION_RUNBOOK.md'),
     handoffs: path.join(docs, 'handoffs'),
     outDir: path.join(root, '.codex-queue'),
@@ -273,7 +292,7 @@ function analyzeProjectMaterials(root) {
     ? listFiles(docs, {
       maxDepth: 2,
       maxFiles: 40,
-      predicate: (file) => file.endsWith('.md') && !/QUEUE_|TASK_QUEUE|handoffs/i.test(file),
+      predicate: (file) => file.endsWith('.md') && !/QUEUE_|TASK_QUEUE|PATCH_QUEUE|handoffs/i.test(file),
     })
     : [];
   const sourceDirs = ['src', 'app', 'apps', 'packages', 'lib', 'server', 'client', 'web', 'mobile']
@@ -346,7 +365,7 @@ function productDocCandidates(root) {
         const name = path.basename(file).toLowerCase();
         return file.endsWith('.md')
           && /(product|prd|requirement|decision|roadmap|spec|需求|产品|决策)/i.test(name)
-          && !/task_queue|queue_|handoff/i.test(name);
+          && !/task_queue|patch_queue|queue_|handoff/i.test(name);
       },
     })
     : [];
@@ -380,9 +399,9 @@ function productDocStatus(filePath) {
   return { exists: true, filePath: actualPath, draft, executable, reasons };
 }
 
-function queueStatus(filePath) {
+function queueStatus(filePath, queueName = 'docs/TASK_QUEUE.md') {
   if (!fileExists(filePath)) {
-    return { exists: false, draft: false, valid: false, ready: null, reasons: ['missing docs/TASK_QUEUE.md'] };
+    return { exists: false, draft: false, valid: false, ready: null, reasons: [`missing ${queueName}`] };
   }
   const text = readMaybe(filePath);
   const draft = /queue status:\s*draft|draft - user confirmation|required before run/i.test(text);
@@ -391,9 +410,9 @@ function queueStatus(filePath) {
   const ready = getReadyTask(text);
   const valid = !draft && hasSections && hasStatuses;
   const reasons = [];
-  if (draft) reasons.push('docs/TASK_QUEUE.md is marked DRAFT');
-  if (!hasSections) reasons.push('docs/TASK_QUEUE.md has no task sections');
-  if (!hasStatuses) reasons.push('docs/TASK_QUEUE.md has no READY/BLOCKED/DONE statuses');
+  if (draft) reasons.push(`${queueName} is marked DRAFT`);
+  if (!hasSections) reasons.push(`${queueName} has no task sections`);
+  if (!hasStatuses) reasons.push(`${queueName} has no READY/BLOCKED/DONE statuses`);
   return { exists: true, draft, valid, ready, reasons };
 }
 
@@ -413,23 +432,26 @@ function getReadyTask(queueText) {
   };
 }
 
-function ensureRunnableProject(root) {
-  const paths = pathsFor(root);
-  const product = productDocStatus(paths.product);
-  const queue = queueStatus(paths.queue);
+function ensureRunnableProject(root, args = {}) {
+  const mode = args.mode || 'project';
+  const paths = pathsFor(root, mode);
+  const product = mode === 'project'
+    ? productDocStatus(paths.product)
+    : { exists: false, filePath: null, draft: false, executable: true, reasons: [] };
+  const queue = queueStatus(paths.queue, queueLabelFor(mode));
   const missing = [];
-  if (!product.executable) missing.push(...product.reasons);
+  if (mode === 'project' && !product.executable) missing.push(...product.reasons);
   if (!queue.valid) missing.push(...queue.reasons);
   if (!fileExists(paths.runbook)) missing.push('missing docs/SESSION_RUNBOOK.md');
   if (missing.length) {
     throw new Error([
-      'Project is not ready for automated task execution.',
+      'Workspace is not ready for automated task execution.',
       ...missing.map((item) => `- ${item}`),
       '',
-      'Run `codex-task-queue init` first, then confirm draft docs before running tasks.',
+      `Run \`codex-task-queue init --mode ${mode}\` first, then confirm draft docs before running tasks.`,
     ].join('\n'));
   }
-  return { paths, product, queue };
+  return { paths, product, queue, mode };
 }
 
 function generateProductDraft(analysis) {
@@ -565,18 +587,120 @@ Do not:
 `;
 }
 
+function generatePatchQueueDraft(analysis) {
+  const packageName = analysis.packageInfo?.name || path.basename(analysis.root);
+  const scripts = analysis.packageInfo?.scripts
+    ? Object.keys(analysis.packageInfo.scripts).slice(0, 12).join(', ')
+    : 'No package scripts detected.';
+  const evidence = analysis.evidenceFiles.length
+    ? analysis.evidenceFiles.map((file) => `- ${rel(analysis.root, file)}`).join('\n')
+    : '- Add issue reports, failing logs, screenshots, warnings, or reproduction notes before execution.';
+
+  return `# Codex Patch Queue
+
+Queue status: DRAFT - user confirmation required before run
+
+Use this queue for maintenance work: bug fixes, warning cleanup, small UI adjustments, targeted refactors, test fixes, or batches of unrelated patches.
+
+Detected project: ${packageName}
+
+Detected package scripts: ${scripts}
+
+Evidence files seen during initialization:
+
+${evidence}
+
+Status values:
+
+- READY: the next session can execute this patch now.
+- BLOCKED: wait until prerequisites, evidence, or user input are supplied.
+- DONE: patch completed and handoff written.
+
+Patch policy:
+
+- This queue does not require \`docs/PRODUCT.md\`; each task must carry its own issue evidence and acceptance checks.
+- Keep exactly one first patch task READY after the draft is confirmed.
+- Keep each patch small enough for one Codex session and one Git commit.
+- Use \`Allowed paths\` as a hard scope fence.
+- Prefer fixing the named issue over opportunistic cleanup.
+
+## P0 Triage Patch List
+
+Status: BLOCKED
+Type: triage
+Severity: n/a
+Prerequisites: user supplies or confirms the issue list
+Allowed paths: \`docs/PATCH_QUEUE.md\`, \`docs/handoffs/P0.md\`
+Deliverable: prioritized patch tasks in \`docs/PATCH_QUEUE.md\`
+
+Issue / Evidence:
+Replace this section with the raw bug list, warnings, screenshots, failing commands, or reproduction notes.
+
+Goal:
+Turn a loose maintenance backlog into small executable patch tasks, then unlock exactly one first patch as READY.
+
+Must include:
+
+- One task per independent bug, warning group, or patch.
+- Repro or evidence for each patch where available.
+- Expected behavior and validation command for each patch.
+- Narrow allowed paths for each patch.
+
+Do not:
+
+- Implement runtime code.
+- Bundle unrelated fixes into one patch task.
+- Execute later tasks.
+
+## P1 First Patch
+
+Status: BLOCKED
+Type: patch
+Severity: TODO
+Prerequisites: P0 or direct user confirmation of this task
+Allowed paths: TODO narrow file paths, \`docs/handoffs/P1.md\`, \`docs/PATCH_QUEUE.md\`
+Deliverable: TODO define the concrete fixed behavior
+
+Issue / Evidence:
+TODO include reproduction steps, error text, screenshot path, warning text, or user report.
+
+Expected:
+TODO describe the exact behavior after the patch.
+
+Validation:
+TODO include the focused command or manual check that proves the patch.
+
+Goal:
+Fix only the named issue.
+
+Must include:
+
+- Defensive handling for the reported failure mode.
+- Focused tests or validation when feasible.
+- A handoff summarizing changed files, validation, and residual risk.
+
+Do not:
+
+- Refactor unrelated code.
+- Change behavior outside the allowed paths.
+- Execute later tasks.
+`;
+}
+
 function generateRunbook() {
   return `# Session Runbook
 
 Every automated Codex task must follow these rules:
 
-1. Read \`docs/PRODUCT.md\`, \`docs/SESSION_RUNBOOK.md\`, and \`docs/TASK_QUEUE.md\`.
+1. Read the active queue context:
+   - Project mode: \`docs/PRODUCT.md\`, \`docs/SESSION_RUNBOOK.md\`, and \`docs/TASK_QUEUE.md\`.
+   - Maintenance mode: \`docs/SESSION_RUNBOOK.md\`, \`docs/PATCH_QUEUE.md\`, and any evidence files named by the current patch task.
 2. Execute only the first task with \`Status: READY\`.
 3. Respect the task's \`Allowed paths\`.
-4. Do not perform later tasks.
-5. If the task is blocked by missing product or implementation decisions, write the blocker in \`docs/handoffs/<task-id>.md\` and leave later tasks blocked.
+4. Do not perform later tasks or opportunistic cleanup.
+5. If the task is blocked by missing product decisions, reproduction evidence, or implementation decisions, write the blocker in \`docs/handoffs/<task-id>.md\` and leave later tasks blocked.
 6. On completion, write \`docs/handoffs/<task-id>.md\`.
-7. Update \`docs/TASK_QUEUE.md\`: mark the current task \`DONE\`, keep completed deliverables clear, and unlock at most one next task as \`READY\`.
+7. Update the active queue file: mark the current task \`DONE\`, keep completed deliverables clear, and unlock at most one next task as \`READY\`.
 8. Run focused validation and record the exact commands in the handoff.
 9. End with a concise summary of changed files, validation, and the next READY task.
 `;
@@ -742,16 +866,34 @@ function outputPathFor(root, iteration, task) {
   return path.join(pathsFor(root).outDir, `${String(iteration).padStart(2, '0')}-${safeTask}-last-message.md`);
 }
 
-function buildTaskPrompt(root, task, productPath) {
-  const productDoc = productPath ? rel(root, productPath) : 'docs/PRODUCT.md';
-  return `Continue this project through codex-task-queue.
+function buildTaskPrompt(root, task, context = {}) {
+  const mode = context.mode || 'project';
+  const queueDoc = queueLabelFor(mode);
+  const productDoc = context.productPath ? rel(root, context.productPath) : 'docs/PRODUCT.md';
+  const readFirst = mode === 'maintenance'
+    ? [
+      '1. docs/SESSION_RUNBOOK.md',
+      `2. ${queueDoc}`,
+      '3. Any evidence files listed in the current patch task',
+    ].join('\n')
+    : [
+      `1. ${productDoc}`,
+      '2. docs/SESSION_RUNBOOK.md',
+      `3. ${queueDoc}`,
+    ].join('\n');
+  const opener = mode === 'maintenance'
+    ? 'Continue this repository through codex-task-queue maintenance mode.'
+    : 'Continue this project through codex-task-queue.';
+  const blockedReason = mode === 'maintenance'
+    ? 'required reproduction, evidence, or implementation details are missing'
+    : 'required product or implementation details are missing';
+
+  return `${opener}
 
 This run was started by the automatic queue runner. Execute only the current task, not later tasks.
 
 Read first:
-1. ${productDoc}
-2. docs/SESSION_RUNBOOK.md
-3. docs/TASK_QUEUE.md
+${readFirst}
 
 Current task:
 
@@ -760,9 +902,9 @@ ${task.body}
 Execution rules:
 1. Strictly respect the task's Allowed paths.
 2. Do not do follow-up tasks opportunistically.
-3. If required product or implementation details are missing, write the blocker in docs/handoffs/${task.id}.md and stop.
+3. If ${blockedReason}, write the blocker in docs/handoffs/${task.id}.md and stop.
 4. When complete, write docs/handoffs/${task.id}.md.
-5. Update docs/TASK_QUEUE.md: mark the current task DONE, fill the deliverable state, and unlock at most one next task as READY.
+5. Update ${queueDoc}: mark the current task DONE, fill the deliverable state, and unlock at most one next task as READY.
 6. End with changed files, validation commands, and the next READY task.
 `;
 }
@@ -1191,6 +1333,8 @@ Usage:
 
 Options:
   --cwd <dir>                    Target project root.
+  --mode project|maintenance     Default: project. Use maintenance for patch queues.
+  --maintenance                  Alias for --mode maintenance.
   --yes                          Confirm Git initialization and baseline commit.
   --runner auto|app-server|exec  Default: auto.
   --max <n>                      Run up to n READY tasks.
@@ -1207,24 +1351,29 @@ Options:
 
 function printDoctor(args) {
   const root = args.cwd;
-  const paths = pathsFor(root);
+  const paths = pathsFor(root, args.mode);
   const codex = commandVersion('codex', ['--version']);
   const gitVersion = commandVersion('git', ['--version']);
-  const product = productDocStatus(paths.product);
-  const queue = queueStatus(paths.queue);
+  const product = args.mode === 'project' ? productDocStatus(paths.product) : null;
+  const queue = queueStatus(paths.queue, queueLabelFor(args.mode));
   const gitRepo = isGitRepo(root);
   const dirty = gitRepo ? gitStatusShort(root) : '';
 
   console.log(`# codex-task-queue doctor\n`);
   console.log(`Project: ${root}`);
+  console.log(`Mode: ${args.mode}`);
   console.log(`Node: ${process.version}`);
   console.log(`Codex CLI: ${codex.ok ? codex.text : `missing (${codex.text})`}`);
   console.log(`Git: ${gitVersion.ok ? gitVersion.text : `missing (${gitVersion.text})`}`);
   console.log(`Git repository: ${gitRepo ? 'yes' : 'no'}`);
   console.log(`Git working tree: ${gitRepo ? (dirty ? 'dirty' : 'clean') : 'not applicable'}`);
-  console.log(`Product doc: ${product.executable ? `executable (${rel(args.cwd, product.filePath)})` : product.exists ? `present but not executable (${rel(args.cwd, product.filePath)})` : 'missing'}`);
-  for (const reason of product.reasons) console.log(`  - ${reason}`);
-  console.log(`Task queue: ${queue.valid ? 'valid' : queue.exists ? 'present but not runnable' : 'missing'}`);
+  if (args.mode === 'project') {
+    console.log(`Product doc: ${product.executable ? `executable (${rel(args.cwd, product.filePath)})` : product.exists ? `present but not executable (${rel(args.cwd, product.filePath)})` : 'missing'}`);
+    for (const reason of product.reasons) console.log(`  - ${reason}`);
+  } else {
+    console.log('Product doc: not required in maintenance mode');
+  }
+  console.log(`Active queue (${queueLabelFor(args.mode)}): ${queue.valid ? 'valid' : queue.exists ? 'present but not runnable' : 'missing'}`);
   for (const reason of queue.reasons) console.log(`  - ${reason}`);
   console.log(`Runbook: ${fileExists(paths.runbook) ? 'present' : 'missing'}`);
   console.log(`First READY task: ${queue.ready ? queue.ready.title : 'none'}`);
@@ -1232,15 +1381,20 @@ function printDoctor(args) {
 
 async function initProject(args) {
   const root = args.cwd;
-  const paths = pathsFor(root);
+  const paths = pathsFor(root, args.mode);
   const analysis = analyzeProjectMaterials(root);
-  const standardProductExists = fileExists(paths.product);
 
   console.log(`# codex-task-queue init\n`);
   console.log(`Project: ${root}`);
+  console.log(`Mode: ${args.mode}`);
 
   const writes = [];
-  if (!standardProductExists || !fileExists(paths.queue)) {
+  if (args.mode === 'maintenance') {
+    if (!fileExists(paths.queue)) {
+      writes.push([paths.queue, generatePatchQueueDraft(analysis)]);
+    }
+  } else {
+    const standardProductExists = fileExists(paths.product);
     if (!analysis.enough) {
       console.log('Not enough project material to generate executable product docs.');
       console.log('Please provide:');
@@ -1255,6 +1409,7 @@ async function initProject(args) {
       writes.push([paths.queue, generateTaskQueueDraft(analysis)]);
     }
   }
+
   if (!fileExists(paths.runbook)) {
     writes.push([paths.runbook, generateRunbook()]);
   }
@@ -1275,7 +1430,9 @@ async function initProject(args) {
   }
 
   if (!writes.length) {
-    console.log('Project queue files already exist.');
+    console.log('Queue files already exist.');
+  } else if (args.mode === 'maintenance') {
+    console.log('\nDraft patch queue was created. Fill or confirm the issue list, remove DRAFT status, and make exactly one first patch task READY before running maintenance tasks.');
   } else {
     console.log('\nDraft docs were created. Review them, remove DRAFT status after user confirmation, and make exactly one first task READY before running implementation tasks.');
   }
@@ -1291,7 +1448,7 @@ async function initProject(args) {
 }
 
 function printNext(args) {
-  const { paths, product } = ensureRunnableProject(args.cwd);
+  const { paths, product, mode } = ensureRunnableProject(args.cwd, args);
   const queueText = readText(paths.queue);
   const task = getReadyTask(queueText);
   if (!task) {
@@ -1302,7 +1459,7 @@ function printNext(args) {
   console.log('');
   console.log('Prompt preview:');
   console.log('');
-  console.log(buildTaskPrompt(args.cwd, task, product.filePath));
+  console.log(buildTaskPrompt(args.cwd, task, { mode, productPath: product.filePath }));
 }
 
 function printHistory(args) {
@@ -1351,7 +1508,7 @@ function printHistory(args) {
 async function runQueue(args) {
   const root = args.cwd;
   await promptRunCount(args);
-  const { paths, product } = ensureRunnableProject(root);
+  const { paths, product, mode } = ensureRunnableProject(root, args);
   await ensureGitForRun(root, args);
 
   let previousTaskTitle = '';
@@ -1365,11 +1522,11 @@ async function runQueue(args) {
       return;
     }
     if (task.title === previousTaskTitle) {
-      fail(`The same READY task is still first in queue: ${task.title}\nStopping to avoid an infinite loop. Check docs/TASK_QUEUE.md and the handoff.`, 1);
+      fail(`The same READY task is still first in queue: ${task.title}\nStopping to avoid an infinite loop. Check ${queueLabelFor(mode)} and the handoff.`, 1);
     }
 
     ensureCleanTaskStart(root, args, task);
-    const prompt = buildTaskPrompt(root, task, product.filePath);
+    const prompt = buildTaskPrompt(root, task, { mode, productPath: product.filePath });
     const beforeNativeSessions = snapshotNativeSessions();
     const result = await runCodex(root, prompt, args, completed + 1, task);
 
