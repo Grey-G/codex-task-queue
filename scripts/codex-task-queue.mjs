@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.2.1';
+const VERSION = '0.4.0';
 const COMMANDS = new Set(['doctor', 'init', 'next', 'run', 'history', 'help']);
 const DEFAULT_IGNORES = new Set([
   '.git',
@@ -27,6 +27,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     mode: process.env.CODEX_TASK_QUEUE_MODE || 'project',
     runner: process.env.CODEX_TASK_QUEUE_RUNNER || 'auto',
+    allowExecFallback: process.env.CODEX_TASK_QUEUE_ALLOW_EXEC_FALLBACK === '1',
     max: null,
     untilBlocked: false,
     dryRun: false,
@@ -59,6 +60,8 @@ function parseArgs(argv) {
       args.runner = argv[++i] || args.runner;
     } else if (arg.startsWith('--runner=')) {
       args.runner = arg.slice('--runner='.length);
+    } else if (arg === '--allow-exec-fallback') {
+      args.allowExecFallback = true;
     } else if (arg === '--max') {
       args.max = Number(argv[++i] || '1');
     } else if (arg.startsWith('--max=')) {
@@ -720,31 +723,13 @@ async function promptYesNo(question, defaultNo = true) {
   return normalized === 'y' || normalized === 'yes';
 }
 
-async function promptRunCount(args) {
+function applyRunCountDefault(args) {
   if (args.max !== null || args.untilBlocked) {
     return args;
   }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    fail('Run count is required in non-interactive mode. Pass --max 1, --max N, or --until-blocked.', 2);
-  }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise((resolve) => {
-    rl.question('How many READY tasks should run? Enter 1, a number, or until-blocked: ', resolve);
-  });
-  rl.close();
-  const normalized = answer.trim().toLowerCase();
-  if (normalized === 'until-blocked' || normalized === 'until blocked' || normalized === 'all') {
-    args.untilBlocked = true;
-    args.max = Number.POSITIVE_INFINITY;
-  } else if (!normalized) {
-    args.max = 1;
-  } else {
-    const count = Number(normalized);
-    if (!Number.isInteger(count) || count < 1) {
-      fail('Invalid run count. Expected 1, a positive integer, or until-blocked.', 2);
-    }
-    args.max = count;
-  }
+  args.untilBlocked = true;
+  args.max = Number.POSITIVE_INFINITY;
+  console.log('No run count specified. Defaulting to --until-blocked.');
   return args;
 }
 
@@ -1280,6 +1265,12 @@ async function runCodex(root, prompt, args, iteration, task) {
   }
 
   if (args.runner === 'exec') {
+    appendRunLog(root, {
+      task,
+      status: 'exec-runner',
+      outputPath,
+      note: 'explicit --runner exec non-visible run',
+    });
     return runCodexExec(root, prompt, args, task, outputPath);
   }
 
@@ -1290,7 +1281,18 @@ async function runCodex(root, prompt, args, iteration, task) {
   if (!appResult.safeToFallback) {
     return appResult;
   }
-  console.error('app-server failed before task execution started; falling back to codex exec --json.');
+  if (!args.allowExecFallback) {
+    console.error('app-server failed before task execution started. Refusing invisible exec fallback by default.');
+    console.error('Rerun with --allow-exec-fallback for one-off fallback, or --runner exec for an explicit non-visible run.');
+    return appResult;
+  }
+  console.error('app-server failed before task execution started; falling back to codex exec --json because --allow-exec-fallback is set.');
+  appendRunLog(root, {
+    task,
+    status: 'exec-fallback',
+    outputPath,
+    note: 'app-server failed before task start; --allow-exec-fallback enabled',
+  });
   return runCodexExec(root, prompt, args, task, outputPath);
 }
 
@@ -1339,8 +1341,9 @@ Options:
   --maintenance                  Alias for --mode maintenance.
   --yes                          Confirm Git initialization and baseline commit.
   --runner auto|app-server|exec  Default: auto.
-  --max <n>                      Run up to n READY tasks.
-  --until-blocked                Run until no READY task remains or a task fails.
+  --allow-exec-fallback          Let auto fall back to invisible codex exec when app-server cannot start.
+  --max <n>                      Run up to n READY tasks. Use --max 1 for one task only.
+  --until-blocked                Run until no READY task remains or a task fails. Default when no --max is passed.
   --dry-run                      Print prompts without starting Codex.
   --no-commit                    Disable automatic task commits.
   --allow-dirty-start            Include existing dirty tree in next task commit.
@@ -1369,6 +1372,8 @@ function printDoctor(args) {
   console.log(`Git: ${gitVersion.ok ? gitVersion.text : `missing (${gitVersion.text})`}`);
   console.log(`Git repository: ${gitRepo ? 'yes' : 'no'}`);
   console.log(`Git working tree: ${gitRepo ? (dirty ? 'dirty' : 'clean') : 'not applicable'}`);
+  console.log(`Runner: ${args.runner}`);
+  console.log(`Exec fallback: ${args.allowExecFallback ? 'enabled' : 'disabled'}`);
   if (args.mode === 'project') {
     console.log(`Product doc: ${product.executable ? `executable (${rel(args.cwd, product.filePath)})` : product.exists ? `present but not executable (${rel(args.cwd, product.filePath)})` : 'missing'}`);
     for (const reason of product.reasons) console.log(`  - ${reason}`);
@@ -1509,7 +1514,7 @@ function printHistory(args) {
 
 async function runQueue(args) {
   const root = args.cwd;
-  await promptRunCount(args);
+  applyRunCountDefault(args);
   const { paths, product, mode } = ensureRunnableProject(root, args);
   await ensureGitForRun(root, args);
 

@@ -22,8 +22,9 @@ Choose the mode first:
    - Fill the draft with the user's bug list, warnings, repro notes, screenshots, or failing commands.
    - Remove draft status only after the user confirms the patch list and make exactly one first patch READY.
 4. If the project is not a Git repository, explain that task commits need Git. Only initialize Git after the user confirms; use `init --yes` when confirmation is already explicit.
-5. Before running, ask how many tasks to run: one task, a specific number, or until blocked.
-6. Run tasks with `run --max N` or `run --until-blocked`. The runner always executes the first `READY` task only, then rereads the active queue.
+5. If the user does not specify a run count, default to running until the queue is blocked or complete.
+6. Use `run --max 1` for one task only, `run --max N` for a bounded batch, or plain `run` / `run --until-blocked` to keep running.
+7. The runner still executes only the first `READY` task in each iteration, then rereads the active queue before continuing.
 
 ## Commands
 
@@ -35,6 +36,7 @@ node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init
 node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init --mode maintenance
 node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor --mode maintenance
 node /path/to/codex-task-queue/scripts/codex-task-queue.mjs next
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run
 node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --max 1
 node /path/to/codex-task-queue/scripts/codex-task-queue.mjs history
 ```
@@ -45,7 +47,10 @@ Useful options:
 - `--mode project|maintenance`: default `project`; use `maintenance` for `docs/PATCH_QUEUE.md`.
 - `--maintenance`: alias for `--mode maintenance`.
 - `--yes`: confirm Git initialization and baseline commit when no Git repository exists.
-- `--runner auto|app-server|exec`: default `auto`; prefer visible `codex app-server`, fall back to `codex exec --json`.
+- `--runner auto|app-server|exec`: default `auto`; prefer visible `codex app-server`. It does not use invisible `exec` fallback unless `--allow-exec-fallback` is also set.
+- `--allow-exec-fallback`: allow `auto` to fall back to `codex exec --json` only if `app-server` fails before task execution starts.
+- `--max <n>`: run a bounded number of tasks; use `--max 1` when you explicitly want only one task.
+- `--until-blocked`: run until no READY task remains or a task fails. This is also the default when no run count is specified.
 - `--no-commit`: run without automatic task commits.
 - `--allow-dirty-start`: include an existing dirty tree in the task commit.
 - `--no-native-session-required`: diagnosis only; do not use for normal queue runs.
@@ -78,5 +83,5 @@ Read `references/queue-format.md` before manually editing queue files or adaptin
 - Do not run with a dirty Git tree unless the user explicitly accepts mixing those changes into the next task commit.
 - Treat `Allowed paths` as a hard scope fence, especially in maintenance mode where unrelated code is often nearby.
 - Stop any long-running process started by a task before finishing. If a process must remain running, record its command, PID or port, and reason in the handoff.
-- Treat `codex app-server` as the preferred visible-thread path, but keep `exec` fallback available because app-server is experimental.
+- Treat `codex app-server` as the preferred visible-thread path. Do not silently fall back to `exec`; fallback must be explicit with `--allow-exec-fallback`, and direct `--runner exec` should be treated as a deliberate non-visible run.
 - If a task cannot proceed without a product decision, reproduction evidence, or implementation decision, it should write a blocker in its handoff and leave the next task blocked.

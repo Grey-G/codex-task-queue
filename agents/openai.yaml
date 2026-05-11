@@ -1,3 +1,3 @@
 display_name: Codex Task Queue
 short_description: Run project or patch queues with Git commits.
-default_prompt: Use codex-task-queue to inspect this repository, choose project mode or maintenance mode, prepare the needed queue docs if missing, then run the first ready task safely.
+default_prompt: Use codex-task-queue to inspect this repository, choose project mode or maintenance mode, prepare the needed queue docs if missing, then run ready tasks until the queue is blocked or complete.
