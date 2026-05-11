@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const COMMANDS = new Set(['doctor', 'init', 'next', 'run', 'history', 'help']);
 const DEFAULT_IGNORES = new Set([
   '.git',
@@ -702,7 +702,8 @@ Every automated Codex task must follow these rules:
 6. On completion, write \`docs/handoffs/<task-id>.md\`.
 7. Update the active queue file: mark the current task \`DONE\`, keep completed deliverables clear, and unlock at most one next task as \`READY\`.
 8. Run focused validation and record the exact commands in the handoff.
-9. End with a concise summary of changed files, validation, and the next READY task.
+9. Stop any long-running process started by the task, such as dev servers, watchers, simulators, tunnels, or background test commands. If a process must remain running, record its command, PID or port, and reason in the handoff.
+10. End with a concise summary of changed files, validation, process cleanup, and the next READY task.
 `;
 }
 
@@ -905,7 +906,8 @@ Execution rules:
 3. If ${blockedReason}, write the blocker in docs/handoffs/${task.id}.md and stop.
 4. When complete, write docs/handoffs/${task.id}.md.
 5. Update ${queueDoc}: mark the current task DONE, fill the deliverable state, and unlock at most one next task as READY.
-6. End with changed files, validation commands, and the next READY task.
+6. Stop any long-running process started by this task. If a process must remain running, record its command, PID or port, and reason in the handoff.
+7. End with changed files, validation commands, process cleanup, and the next READY task.
 `;
 }
 

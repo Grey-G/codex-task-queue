@@ -77,5 +77,6 @@ Read `references/queue-format.md` before manually editing queue files or adaptin
 - Do not skip ahead in the queue. Execute only the first `READY` task.
 - Do not run with a dirty Git tree unless the user explicitly accepts mixing those changes into the next task commit.
 - Treat `Allowed paths` as a hard scope fence, especially in maintenance mode where unrelated code is often nearby.
+- Stop any long-running process started by a task before finishing. If a process must remain running, record its command, PID or port, and reason in the handoff.
 - Treat `codex app-server` as the preferred visible-thread path, but keep `exec` fallback available because app-server is experimental.
 - If a task cannot proceed without a product decision, reproduction evidence, or implementation decision, it should write a blocker in its handoff and leave the next task blocked.

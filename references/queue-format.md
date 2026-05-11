@@ -91,3 +91,4 @@ Queue rules:
 - Draft queues must include `Queue status: DRAFT` and should not contain executable `READY` implementation tasks.
 - Patch tasks should include `Issue / Evidence`, `Expected`, and `Validation` fields whenever possible.
 - For loose bug lists, create a `P0` triage task first, then split the work into independent patch tasks.
+- A task must stop any long-running process it started. If it intentionally leaves one running, the handoff must record the command, PID or port, and reason.
