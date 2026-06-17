@@ -79,16 +79,19 @@ Do not:
 Status values:
 
 - `READY`: the first runnable task.
+- `RUNNING`: claimed by the parallel coordinator.
 - `BLOCKED`: waiting for prerequisites, user input, or prior tasks.
 - `DONE`: completed with a handoff.
 
 Queue rules:
 
-- Exactly one task should normally be `READY`.
-- The runner executes only the first `READY` task per iteration, then rereads the queue.
+- Parallel execution is the default. The runner creates a main task branch, executes independent tasks in separate worktrees, and merges successful branches back into the main task branch.
+- `--max-parallel` defaults to `5`; `--no-parallel` or `--max-parallel 1` uses the serial execution loop on the run's main task branch.
+- In parallel mode, tasks whose `Prerequisites` contain only completed task ids can be unlocked automatically.
+- In serial mode, the runner executes only the first `READY` task per iteration, then rereads the queue.
 - If no run count is specified, the runner continues until the queue is blocked, complete, or a task fails. Use `--max 1` for a single-task run.
 - Each task should fit in one Codex session and one Git commit.
-- Each completed task writes `docs/handoffs/<task-id>.md`, marks itself `DONE`, and unlocks the next task by setting it to `READY`.
+- Each completed task writes `docs/handoffs/<task-id>.md`. In parallel mode, the coordinator marks tasks `DONE` and unlocks runnable dependents; workers do not edit queue status.
 - Draft queues must include `Queue status: DRAFT` and should not contain executable `READY` implementation tasks.
 - Patch tasks should include `Issue / Evidence`, `Expected`, and `Validation` fields whenever possible.
 - For loose bug lists, create a `P0` triage task first, then split the work into independent patch tasks.

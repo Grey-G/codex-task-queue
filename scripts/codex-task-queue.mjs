@@ -5,7 +5,12 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
+const DEFAULT_MODEL = 'gpt-5.5';
+const DEFAULT_REASONING_EFFORT = 'xhigh';
+const DEFAULT_SERVICE_TIER = 'standard';
+const DEFAULT_MACOS_CODEX = '/Applications/Codex.app/Contents/Resources/codex';
+const DEFAULT_MAX_PARALLEL = 5;
 const COMMANDS = new Set(['doctor', 'init', 'next', 'run', 'history', 'help']);
 const DEFAULT_IGNORES = new Set([
   '.git',
@@ -29,6 +34,8 @@ function parseArgs(argv) {
     runner: process.env.CODEX_TASK_QUEUE_RUNNER || 'auto',
     allowExecFallback: process.env.CODEX_TASK_QUEUE_ALLOW_EXEC_FALLBACK === '1',
     max: null,
+    parallel: process.env.CODEX_TASK_QUEUE_PARALLEL !== '0',
+    maxParallel: Number(process.env.CODEX_TASK_QUEUE_MAX_PARALLEL || DEFAULT_MAX_PARALLEL),
     untilBlocked: false,
     dryRun: false,
     autoCommit: process.env.CODEX_TASK_QUEUE_AUTO_COMMIT !== '0',
@@ -36,7 +43,10 @@ function parseArgs(argv) {
     requireNativeSession: process.env.CODEX_TASK_QUEUE_REQUIRE_NATIVE_SESSION !== '0',
     approval: process.env.CODEX_TASK_QUEUE_APPROVAL || 'never',
     sandbox: process.env.CODEX_TASK_QUEUE_SANDBOX || 'workspace-write',
-    model: process.env.CODEX_TASK_QUEUE_MODEL || '',
+    model: process.env.CODEX_TASK_QUEUE_MODEL || DEFAULT_MODEL,
+    reasoningEffort: process.env.CODEX_TASK_QUEUE_REASONING_EFFORT || process.env.CODEX_TASK_QUEUE_MODEL_REASONING_EFFORT || DEFAULT_REASONING_EFFORT,
+    serviceTier: process.env.CODEX_TASK_QUEUE_SERVICE_TIER || process.env.CODEX_TASK_QUEUE_SPEED || DEFAULT_SERVICE_TIER,
+    codexCommand: process.env.CODEX_TASK_QUEUE_CODEX || process.env.CODEX_CLI_PATH || '',
     yes: false,
     commitPrefix: process.env.CODEX_TASK_QUEUE_COMMIT_PREFIX || 'queue',
     timeoutMs: Number(process.env.CODEX_TASK_QUEUE_TURN_TIMEOUT_MS || 60 * 60 * 1000),
@@ -66,6 +76,14 @@ function parseArgs(argv) {
       args.max = Number(argv[++i] || '1');
     } else if (arg.startsWith('--max=')) {
       args.max = Number(arg.slice('--max='.length));
+    } else if (arg === '--max-parallel') {
+      args.maxParallel = Number(argv[++i] || String(DEFAULT_MAX_PARALLEL));
+    } else if (arg.startsWith('--max-parallel=')) {
+      args.maxParallel = Number(arg.slice('--max-parallel='.length));
+    } else if (arg === '--parallel') {
+      args.parallel = true;
+    } else if (arg === '--no-parallel') {
+      args.parallel = false;
     } else if (arg === '--until-blocked') {
       args.untilBlocked = true;
       args.max = Number.POSITIVE_INFINITY;
@@ -89,6 +107,22 @@ function parseArgs(argv) {
       args.model = argv[++i] || '';
     } else if (arg.startsWith('--model=')) {
       args.model = arg.slice('--model='.length);
+    } else if (arg === '--reasoning-effort') {
+      args.reasoningEffort = argv[++i] || '';
+    } else if (arg.startsWith('--reasoning-effort=')) {
+      args.reasoningEffort = arg.slice('--reasoning-effort='.length);
+    } else if (arg === '--service-tier') {
+      args.serviceTier = argv[++i] || '';
+    } else if (arg.startsWith('--service-tier=')) {
+      args.serviceTier = arg.slice('--service-tier='.length);
+    } else if (arg === '--speed') {
+      args.serviceTier = argv[++i] || '';
+    } else if (arg.startsWith('--speed=')) {
+      args.serviceTier = arg.slice('--speed='.length);
+    } else if (arg === '--codex') {
+      args.codexCommand = argv[++i] || '';
+    } else if (arg.startsWith('--codex=')) {
+      args.codexCommand = arg.slice('--codex='.length);
     } else if (arg === '--yes' || arg === '-y') {
       args.yes = true;
     } else if (arg === '--commit-prefix') {
@@ -105,6 +139,7 @@ function parseArgs(argv) {
   args.command = args.command || 'doctor';
   args.cwd = path.resolve(args.cwd);
   args.mode = String(args.mode || 'project').toLowerCase();
+  args.codexCommand = args.codexCommand || defaultCodexCommand();
 
   if (!['project', 'maintenance'].includes(args.mode)) {
     fail('Invalid --mode value. Expected project or maintenance.', 2);
@@ -114,6 +149,9 @@ function parseArgs(argv) {
   }
   if (args.max !== null && args.max !== Number.POSITIVE_INFINITY && (!Number.isInteger(args.max) || args.max < 1)) {
     fail('Invalid --max value. Expected a positive integer.', 2);
+  }
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) {
+    fail('Invalid --max-parallel value. Expected a positive integer.', 2);
   }
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) {
     args.timeoutMs = 60 * 60 * 1000;
@@ -140,6 +178,7 @@ function pathsFor(root, mode = 'project') {
     runbook: path.join(docs, 'SESSION_RUNBOOK.md'),
     handoffs: path.join(docs, 'handoffs'),
     outDir: path.join(root, '.codex-queue'),
+    parallelState: path.join(root, '.codex-queue', 'parallel-state.json'),
     runLog: path.join(docs, 'QUEUE_RUN_LOG.md'),
     nativeSessions: path.join(docs, 'QUEUE_NATIVE_SESSIONS.md'),
   };
@@ -184,6 +223,30 @@ function dirExists(dirPath) {
   return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
 }
 
+function defaultCodexCommand() {
+  return fileExists(DEFAULT_MACOS_CODEX) ? DEFAULT_MACOS_CODEX : 'codex';
+}
+
+function codexConfigArg(key, value) {
+  return `${key}=${JSON.stringify(value)}`;
+}
+
+function appendCodexConfigArgs(commandArgs, args) {
+  if (args.reasoningEffort) {
+    commandArgs.push('-c', codexConfigArg('model_reasoning_effort', args.reasoningEffort));
+  }
+  if (args.serviceTier) {
+    commandArgs.push('-c', codexConfigArg('service_tier', args.serviceTier));
+  }
+}
+
+function threadStartConfig(args) {
+  const config = {};
+  if (args.reasoningEffort) config.model_reasoning_effort = args.reasoningEffort;
+  if (args.serviceTier) config.service_tier = args.serviceTier;
+  return Object.keys(config).length ? config : null;
+}
+
 function runCommand(command, commandArgs, options = {}) {
   return spawnSync(command, commandArgs, {
     cwd: options.cwd,
@@ -208,6 +271,82 @@ function gitStatusShort(root) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || 'git status failed');
   }
   return result.stdout.trim();
+}
+
+function gitRequire(root, gitArgs, description = 'git command failed') {
+  const result = git(root, gitArgs);
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || description);
+  }
+  return result.stdout.trim();
+}
+
+function currentBranch(root) {
+  const branch = git(root, ['branch', '--show-current']);
+  if (branch.status === 0 && branch.stdout.trim()) return branch.stdout.trim();
+  return gitRequire(root, ['rev-parse', '--short', 'HEAD'], 'failed to determine current git ref');
+}
+
+function gitRef(root, ref = 'HEAD') {
+  return gitRequire(root, ['rev-parse', ref], `failed to resolve ${ref}`);
+}
+
+function branchExists(root, branch) {
+  return git(root, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
+}
+
+function ensureBranchNameAvailable(root, branch) {
+  if (branchExists(root, branch)) {
+    throw new Error(`Branch already exists: ${branch}`);
+  }
+}
+
+function checkoutNewBranch(root, branch, startPoint = 'HEAD') {
+  ensureBranchNameAvailable(root, branch);
+  gitRequire(root, ['switch', '-c', branch, startPoint], `failed to create branch ${branch}`);
+}
+
+function checkoutBranch(root, branch) {
+  gitRequire(root, ['switch', branch], `failed to switch to branch ${branch}`);
+}
+
+function mergeBranch(root, branch, message) {
+  return git(root, ['merge', '--no-ff', '--no-edit', '-m', message, branch]);
+}
+
+function unmergedFiles(root) {
+  const result = git(root, ['diff', '--name-only', '--diff-filter=U']);
+  if (result.status !== 0) return [];
+  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function worktreeRootFor(root, runId) {
+  return path.join(path.dirname(root), '.codex-task-worktrees', path.basename(root), runId);
+}
+
+function addWorktree(root, worktreePath, branch, startPoint) {
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+  ensureBranchNameAvailable(root, branch);
+  gitRequire(root, ['worktree', 'add', '-b', branch, worktreePath, startPoint], `failed to add worktree for ${branch}`);
+}
+
+function removeWorktree(root, worktreePath) {
+  const result = git(root, ['worktree', 'remove', '--force', worktreePath]);
+  if (result.status !== 0) {
+    console.warn(result.stderr.trim() || result.stdout.trim() || `Failed to remove worktree ${worktreePath}`);
+    return false;
+  }
+  return true;
+}
+
+function commitAll(root, subject, body = '') {
+  const status = gitStatusShort(root);
+  if (!status) return false;
+  gitRequire(root, ['add', '-A'], 'git add failed');
+  const args = ['commit', '-m', subject];
+  if (body) args.push('-m', body);
+  gitRequire(root, args, 'git commit failed');
+  return true;
 }
 
 function commandVersion(command, commandArgs) {
@@ -409,21 +548,80 @@ function queueStatus(filePath, queueName = 'docs/TASK_QUEUE.md') {
   const text = readMaybe(filePath);
   const draft = /queue status:\s*draft|draft - user confirmation|required before run/i.test(text);
   const hasSections = /^##\s+.+$/m.test(text);
-  const hasStatuses = /^Status:\s*(READY|BLOCKED|DONE)\s*$/gm.test(text);
+  const hasStatuses = /^Status:\s*(READY|RUNNING|BLOCKED|DONE)\s*$/gm.test(text);
   const ready = getReadyTask(text);
   const valid = !draft && hasSections && hasStatuses;
   const reasons = [];
   if (draft) reasons.push(`${queueName} is marked DRAFT`);
   if (!hasSections) reasons.push(`${queueName} has no task sections`);
-  if (!hasStatuses) reasons.push(`${queueName} has no READY/BLOCKED/DONE statuses`);
+  if (!hasStatuses) reasons.push(`${queueName} has no READY/RUNNING/BLOCKED/DONE statuses`);
   return { exists: true, draft, valid, ready, reasons };
 }
 
-function getReadyTask(queueText) {
-  const sections = queueText
+function markdownSections(queueText) {
+  return queueText
     .split(/\n(?=## )/g)
     .filter((section) => section.startsWith('## '));
-  const ready = sections.find((section) => /^Status:\s*READY\s*$/m.test(section));
+}
+
+function parseTaskField(section, fieldName) {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return section.match(new RegExp(`^${escaped}:\\s*(.+)$`, 'mi'))?.[1]?.trim() || '';
+}
+
+function parseAllowedPaths(section) {
+  const raw = parseTaskField(section, 'Allowed paths');
+  if (!raw) return [];
+  const backticked = [...raw.matchAll(/`([^`]+)`/g)].map((match) => match[1].trim()).filter(Boolean);
+  if (backticked.length) return backticked;
+  return raw.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function parseQueueTasks(queueText) {
+  const sections = markdownSections(queueText);
+  const firstPass = sections.map((section, index) => {
+    const title = section.match(/^##\s+(.+)$/m)?.[1]?.trim() || `Task ${index + 1}`;
+    return {
+      id: title.split(/\s+/)[0] || `TASK${index + 1}`,
+      title,
+      body: section.trim(),
+      section,
+      index,
+      status: (parseTaskField(section, 'Status') || 'BLOCKED').toUpperCase(),
+      rawPrerequisites: parseTaskField(section, 'Prerequisites') || 'none',
+      allowedPaths: parseAllowedPaths(section),
+    };
+  });
+  const ids = new Set(firstPass.map((task) => task.id));
+  return firstPass.map((task) => {
+    const raw = task.rawPrerequisites.trim();
+    if (!raw || /^none$/i.test(raw)) {
+      return { ...task, dependencyIds: [], hasNonTaskPrerequisites: false };
+    }
+    let remainder = raw;
+    const dependencyIds = [];
+    for (const id of ids) {
+      const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)`).test(raw)) {
+        dependencyIds.push(id);
+        remainder = remainder.replace(new RegExp(`(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)`, 'g'), ' ');
+      }
+    }
+    remainder = remainder.replace(/\b(and|or)\b/gi, ' ').replace(/[,\s]+/g, ' ').trim();
+    return {
+      ...task,
+      dependencyIds: dependencyIds.sort((a, b) => {
+        const ai = firstPass.find((candidate) => candidate.id === a)?.index ?? 0;
+        const bi = firstPass.find((candidate) => candidate.id === b)?.index ?? 0;
+        return ai - bi;
+      }),
+      hasNonTaskPrerequisites: Boolean(remainder),
+    };
+  });
+}
+
+function getReadyTask(queueText) {
+  const ready = markdownSections(queueText).find((section) => /^Status:\s*READY\s*$/m.test(section));
   if (!ready) {
     return null;
   }
@@ -433,6 +631,23 @@ function getReadyTask(queueText) {
     title,
     body: ready.trim(),
   };
+}
+
+function updateQueueTaskStatuses(queueText, statusById) {
+  return queueText
+    .split(/\n(?=## )/g)
+    .map((part) => {
+      if (!part.startsWith('## ')) return part;
+      const title = part.match(/^##\s+(.+)$/m)?.[1]?.trim() || '';
+      const id = title.split(/\s+/)[0] || '';
+      const status = statusById.get(id);
+      if (!status) return part;
+      if (/^Status:\s*.+$/mi.test(part)) {
+        return part.replace(/^Status:\s*.+$/mi, `Status: ${status}`);
+      }
+      return part.replace(/^##\s+.+$/m, (heading) => `${heading}\n\nStatus: ${status}`);
+    })
+    .join('\n');
 }
 
 function ensureRunnableProject(root, args = {}) {
@@ -516,7 +731,7 @@ ${evidence}
 ## Acceptance Criteria
 
 - The user confirms this product document is accurate enough to execute.
-- docs/TASK_QUEUE.md contains one first READY task and later tasks are BLOCKED.
+- docs/TASK_QUEUE.md contains executable task sections with READY/BLOCKED/DONE status.
 - Each task has prerequisites, allowed paths, deliverables, must-include items, and do-not items.
 - The project is a Git repository before task execution starts.
 
@@ -538,13 +753,14 @@ Queue status: DRAFT - user confirmation required before run
 Status values:
 
 - READY: the next session can execute this task now.
+- RUNNING: claimed by the parallel coordinator.
 - BLOCKED: wait until prerequisites are DONE or user input is supplied.
 - DONE: task completed and handoff written.
 
 Queue policy:
 
 - Do not run this draft queue until the product document is confirmed.
-- After confirmation, set Queue status to CONFIRMED and make exactly one first task READY.
+- After confirmation, set Queue status to CONFIRMED and make all independent first tasks READY.
 - Keep each task small enough for one Codex session and one Git commit.
 
 ## A1 Confirm Product Contract
@@ -561,7 +777,7 @@ Must include:
 
 - Product goal, users, scope, non-goals, acceptance criteria, and constraints.
 - A first READY implementation or verification task.
-- Later tasks left BLOCKED.
+- Later dependent tasks left BLOCKED with explicit prerequisites.
 
 Do not:
 
@@ -616,13 +832,14 @@ ${evidence}
 Status values:
 
 - READY: the next session can execute this patch now.
+- RUNNING: claimed by the parallel coordinator.
 - BLOCKED: wait until prerequisites, evidence, or user input are supplied.
 - DONE: patch completed and handoff written.
 
 Patch policy:
 
 - This queue does not require \`docs/PRODUCT.md\`; each task must carry its own issue evidence and acceptance checks.
-- Keep exactly one first patch task READY after the draft is confirmed.
+- Keep independent first patch tasks READY after the draft is confirmed.
 - Keep each patch small enough for one Codex session and one Git commit.
 - Use \`Allowed paths\` as a hard scope fence.
 - Prefer fixing the named issue over opportunistic cleanup.
@@ -640,7 +857,7 @@ Issue / Evidence:
 Replace this section with the raw bug list, warnings, screenshots, failing commands, or reproduction notes.
 
 Goal:
-Turn a loose maintenance backlog into small executable patch tasks, then unlock exactly one first patch as READY.
+Turn a loose maintenance backlog into small executable patch tasks, then unlock independent first patches as READY.
 
 Must include:
 
@@ -698,12 +915,12 @@ Every automated Codex task must follow these rules:
 1. Read the active queue context:
    - Project mode: \`docs/PRODUCT.md\`, \`docs/SESSION_RUNBOOK.md\`, and \`docs/TASK_QUEUE.md\`.
    - Maintenance mode: \`docs/SESSION_RUNBOOK.md\`, \`docs/PATCH_QUEUE.md\`, and any evidence files named by the current patch task.
-2. Execute only the first task with \`Status: READY\`.
+2. In parallel mode, execute only tasks whose prerequisites are satisfied. In serial mode, execute only the first task with \`Status: READY\`.
 3. Respect the task's \`Allowed paths\`.
 4. Do not perform later tasks or opportunistic cleanup.
 5. If the task is blocked by missing product decisions, reproduction evidence, or implementation decisions, write the blocker in \`docs/handoffs/<task-id>.md\` and leave later tasks blocked.
 6. On completion, write \`docs/handoffs/<task-id>.md\`.
-7. Update the active queue file: mark the current task \`DONE\`, keep completed deliverables clear, and unlock at most one next task as \`READY\`.
+7. Serial mode updates the active queue file directly. Parallel workers must not update queue status; the coordinator marks tasks \`DONE\` and unlocks runnable dependents.
 8. Run focused validation and record the exact commands in the handoff.
 9. Stop any long-running process started by the task, such as dev servers, watchers, simulators, tunnels, or background test commands. If a process must remain running, record its command, PID or port, and reason in the handoff.
 10. End with a concise summary of changed files, validation, process cleanup, and the next READY task.
@@ -821,23 +1038,34 @@ function appendRunLog(root, { task, status, outputPath = '', note = '' }) {
   appendText(paths.runLog, `| ${line} |\n`);
 }
 
-function appendNativeSessionLog(root, { task, session, outputPath = '' }) {
+function appendNativeSessionLog(root, { task, session, outputPath = '', codexCommand = 'codex', branch = '', worktree = '' }) {
   const paths = pathsFor(root);
   if (!session) {
     appendRunLog(root, { task, status: 'native-session-missing', note: 'No new Codex native session file detected' });
     return false;
   }
+  const header = '# Queue Native Codex Sessions\n\n| Time | Task | Session ID | Source | Branch | Worktree | Raw Session File | Resume Command | Last Message |\n|---|---|---|---|---|---|---|---|---|\n';
   if (!fileExists(paths.nativeSessions)) {
-    writeText(paths.nativeSessions, '# Queue Native Codex Sessions\n\n| Time | Task | Session ID | Source | Raw Session File | Resume Command | Last Message |\n|---|---|---|---|---|---|---|\n');
+    writeText(paths.nativeSessions, header);
+  } else {
+    const existing = readText(paths.nativeSessions);
+    if (!existing.includes('| Branch | Worktree |')) {
+      writeText(paths.nativeSessions, existing.replace(
+        /^# Queue Native Codex Sessions\n\n\| Time \| Task \| Session ID \| Source \| Raw Session File \| Resume Command \| Last Message \|\n\|---\|---\|---\|---\|---\|---\|---\|\n/,
+        header,
+      ));
+    }
   }
   const resumeCommand = session.source === 'exec'
-    ? `codex resume --include-non-interactive ${session.id}`
-    : `codex resume ${session.id}`;
+    ? `${codexCommand} resume --include-non-interactive ${session.id}`
+    : `${codexCommand} resume ${session.id}`;
   const line = [
     new Date().toISOString(),
     task?.title || '',
     `\`${session.id}\``,
     session.source || session.originator || '',
+    branch ? `\`${branch}\`` : '',
+    worktree ? `\`${worktree}\`` : '',
     `\`${session.filePath}\``,
     `\`${resumeCommand}\``,
     outputPath ? `\`${rel(root, outputPath)}\`` : '',
@@ -893,6 +1121,60 @@ Execution rules:
 5. Update ${queueDoc}: mark the current task DONE, fill the deliverable state, and unlock at most one next task as READY.
 6. Stop any long-running process started by this task. If a process must remain running, record its command, PID or port, and reason in the handoff.
 7. End with changed files, validation commands, process cleanup, and the next READY task.
+`;
+}
+
+function buildParallelTaskPrompt(root, task, context = {}) {
+  const mode = context.mode || 'project';
+  const queueDoc = queueLabelFor(mode);
+  const productDoc = context.productPath ? rel(root, context.productPath) : 'docs/PRODUCT.md';
+  const readFirst = mode === 'maintenance'
+    ? [
+      '1. docs/SESSION_RUNBOOK.md',
+      `2. ${queueDoc}`,
+      '3. Any evidence files listed in the current patch task',
+    ].join('\n')
+    : [
+      `1. ${productDoc}`,
+      '2. docs/SESSION_RUNBOOK.md',
+      `3. ${queueDoc}`,
+    ].join('\n');
+  return `Continue this repository through codex-task-queue parallel worker mode.
+
+This run is coordinated by the queue runner. Execute only the current task in this worktree.
+
+Read first:
+${readFirst}
+
+Current task:
+
+${task.body}
+
+Execution rules:
+1. Strictly respect the task's Allowed paths.
+2. Do not do follow-up tasks opportunistically.
+3. Do not edit ${queueDoc}; the coordinator owns queue state in parallel mode.
+4. If required product decisions, reproduction evidence, or implementation details are missing, write the blocker in docs/handoffs/${task.id}.md and stop.
+5. When complete, write docs/handoffs/${task.id}.md.
+6. Stop any long-running process started by this task. If a process must remain running, record its command, PID or port, and reason in the handoff.
+7. End with changed files, validation commands, process cleanup, and any blocker or residual risk.
+`;
+}
+
+function buildConflictResolutionPrompt(task, conflictFiles, mergedBranch) {
+  return `Continue this codex-task-queue parallel run by resolving a Git merge conflict.
+
+The coordinator attempted to merge ${mergedBranch} for task ${task.title}. Resolve the current merge conflicts in this worktree, then run focused validation relevant to the conflicting files.
+
+Conflict files:
+${conflictFiles.map((file) => `- ${file}`).join('\n') || '- unknown'}
+
+Rules:
+1. Resolve only the merge conflict and any directly necessary compile/test fallout.
+2. Do not broaden product scope or run later queue tasks.
+3. Do not edit queue status unless it is required to resolve a conflict marker in the queue file.
+4. Leave a short note in docs/handoffs/${task.id}.md if the conflict resolution changes risk or validation.
+5. End with files changed and validation commands.
 `;
 }
 
@@ -957,6 +1239,7 @@ function runCodexExec(root, prompt, args, task, outputPath) {
     '--sandbox',
     args.sandbox,
   ];
+  appendCodexConfigArgs(cmd, args);
   if (args.model) {
     cmd.push('--model', args.model);
   }
@@ -970,8 +1253,8 @@ function runCodexExec(root, prompt, args, task, outputPath) {
     outputPath,
     '-',
   );
-  console.log(`codex ${cmd.join(' ')}`);
-  const result = runCommand('codex', cmd, {
+  console.log(`${args.codexCommand} ${cmd.join(' ')}`);
+  const result = runCommand(args.codexCommand, cmd, {
     cwd: root,
     input: prompt,
     stdio: ['pipe', 'inherit', 'inherit'],
@@ -995,7 +1278,9 @@ function requestForServerRequest(message) {
 function runCodexAppServer(root, prompt, args, task, outputPath) {
   return new Promise((resolve) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    const child = spawn('codex', ['app-server', '--config', 'plugins={}'], {
+    const appServerArgs = ['app-server', '--config', 'plugins={}'];
+    appendCodexConfigArgs(appServerArgs, args);
+    const child = spawn(args.codexCommand, appServerArgs, {
       cwd: root,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -1125,6 +1410,8 @@ function runCodexAppServer(root, prompt, args, task, outputPath) {
               approvalPolicy: args.approval,
               sandbox: args.sandbox,
               model: args.model || null,
+              serviceTier: args.serviceTier || null,
+              config: threadStartConfig(args),
               ephemeral: false,
               sessionStartSource: 'startup',
             },
@@ -1154,6 +1441,9 @@ function runCodexAppServer(root, prompt, args, task, outputPath) {
               threadId: thread.id,
               cwd: root,
               approvalPolicy: args.approval,
+              model: args.model || null,
+              serviceTier: args.serviceTier || null,
+              effort: args.reasoningEffort || null,
               input: [
                 {
                   type: 'text',
@@ -1235,7 +1525,7 @@ function runCodexAppServer(root, prompt, args, task, outputPath) {
       resolve({ status: exitCode, outputPath, safeToFallback: !turnStarted && exitCode !== 0 });
     });
 
-    console.log('codex app-server --config plugins={}');
+    console.log(`${args.codexCommand} ${appServerArgs.join(' ')}`);
     send({
       id: ids.initialize,
       method: 'initialize',
@@ -1254,13 +1544,26 @@ function runCodexAppServer(root, prompt, args, task, outputPath) {
 }
 
 async function runCodex(root, prompt, args, iteration, task) {
-  const outputPath = outputPathFor(root, iteration, task);
+  const outputRoot = args.outputRoot || root;
+  const outputPath = outputPathFor(outputRoot, iteration, task);
   console.log(`\n=== Running ${task.title} ===`);
-  console.log(`Last message: ${rel(root, outputPath)}`);
+  console.log(`Last message: ${rel(outputRoot, outputPath)}`);
 
   if (args.dryRun) {
     console.log('\n--- Prompt preview ---\n');
     console.log(prompt);
+    return { status: 0, outputPath, skipped: true };
+  }
+
+  if (process.env.CODEX_TASK_QUEUE_FAKE_RUNNER === '1') {
+    writeText(outputPath, `Fake runner completed ${task.title}`);
+    const handoffPath = path.join(root, 'docs', 'handoffs', `${task.id}.md`);
+    writeText(handoffPath, [
+      `# ${task.title}`,
+      '',
+      'Completed by CODEX_TASK_QUEUE_FAKE_RUNNER.',
+      '',
+    ].join('\n'));
     return { status: 0, outputPath, skipped: true };
   }
 
@@ -1343,6 +1646,8 @@ Options:
   --runner auto|app-server|exec  Default: auto.
   --allow-exec-fallback          Let auto fall back to invisible codex exec when app-server cannot start.
   --max <n>                      Run up to n READY tasks. Use --max 1 for one task only.
+  --max-parallel <n>             Default: ${DEFAULT_MAX_PARALLEL}. Parallel worker limit.
+  --no-parallel                  Use the serial execution loop on a main task branch.
   --until-blocked                Run until no READY task remains or a task fails. Default when no --max is passed.
   --dry-run                      Print prompts without starting Codex.
   --no-commit                    Disable automatic task commits.
@@ -1350,14 +1655,18 @@ Options:
   --no-native-session-required   Do not fail when no native session id is detected.
   --approval <policy>            Default: never.
   --sandbox <mode>               Default: workspace-write.
-  --model <model>                Optional Codex model.
+  --model <model>                Default: ${DEFAULT_MODEL}.
+  --reasoning-effort <effort>    Default: ${DEFAULT_REASONING_EFFORT}.
+  --service-tier <tier>          Default: ${DEFAULT_SERVICE_TIER}.
+  --speed <tier>                 Alias for --service-tier.
+  --codex <path>                 Codex CLI path. Defaults to Desktop app CLI on macOS when present.
 `);
 }
 
 function printDoctor(args) {
   const root = args.cwd;
   const paths = pathsFor(root, args.mode);
-  const codex = commandVersion('codex', ['--version']);
+  const codex = commandVersion(args.codexCommand, ['--version']);
   const gitVersion = commandVersion('git', ['--version']);
   const product = args.mode === 'project' ? productDocStatus(paths.product) : null;
   const queue = queueStatus(paths.queue, queueLabelFor(args.mode));
@@ -1368,11 +1677,16 @@ function printDoctor(args) {
   console.log(`Project: ${root}`);
   console.log(`Mode: ${args.mode}`);
   console.log(`Node: ${process.version}`);
+  console.log(`Codex command: ${args.codexCommand}`);
   console.log(`Codex CLI: ${codex.ok ? codex.text : `missing (${codex.text})`}`);
+  console.log(`Model: ${args.model || '(Codex default)'}`);
+  console.log(`Reasoning effort: ${args.reasoningEffort || '(Codex default)'}`);
+  console.log(`Service tier: ${args.serviceTier || '(Codex default)'}`);
   console.log(`Git: ${gitVersion.ok ? gitVersion.text : `missing (${gitVersion.text})`}`);
   console.log(`Git repository: ${gitRepo ? 'yes' : 'no'}`);
   console.log(`Git working tree: ${gitRepo ? (dirty ? 'dirty' : 'clean') : 'not applicable'}`);
   console.log(`Runner: ${args.runner}`);
+  console.log(`Parallel: ${args.parallel && args.maxParallel > 1 ? `enabled (max ${args.maxParallel})` : 'disabled'}`);
   console.log(`Exec fallback: ${args.allowExecFallback ? 'enabled' : 'disabled'}`);
   if (args.mode === 'project') {
     console.log(`Product doc: ${product.executable ? `executable (${rel(args.cwd, product.filePath)})` : product.exists ? `present but not executable (${rel(args.cwd, product.filePath)})` : 'missing'}`);
@@ -1439,9 +1753,9 @@ async function initProject(args) {
   if (!writes.length) {
     console.log('Queue files already exist.');
   } else if (args.mode === 'maintenance') {
-    console.log('\nDraft patch queue was created. Fill or confirm the issue list, remove DRAFT status, and make exactly one first patch task READY before running maintenance tasks.');
+    console.log('\nDraft patch queue was created. Fill or confirm the issue list, remove DRAFT status, and make independent first patch tasks READY before running maintenance tasks.');
   } else {
-    console.log('\nDraft docs were created. Review them, remove DRAFT status after user confirmation, and make exactly one first task READY before running implementation tasks.');
+    console.log('\nDraft docs were created. Review them, remove DRAFT status after user confirmation, and make independent first tasks READY before running implementation tasks.');
   }
 
   if (!isGitRepo(root)) {
@@ -1505,18 +1819,399 @@ function printHistory(args) {
   } else {
     for (const session of nativeSessions) {
       const command = session.source === 'exec'
-        ? `codex resume --include-non-interactive ${session.id}`
-        : `codex resume ${session.id}`;
+        ? `${args.codexCommand} resume --include-non-interactive ${session.id}`
+        : `${args.codexCommand} resume ${session.id}`;
       console.log(`  ${session.id}  ${command}`);
     }
   }
 }
 
-async function runQueue(args) {
+function isInternalQueuePath(filePath, mode) {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalized === queueLabelFor(mode)
+    || normalized === 'docs/SESSION_RUNBOOK.md'
+    || normalized.startsWith('docs/handoffs/')
+    || normalized.startsWith('.codex-queue/');
+}
+
+function conflictKey(filePath) {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  if (!normalized || /^todo\b/i.test(normalized)) return '*';
+  if (normalized.includes('**')) return normalized.slice(0, normalized.indexOf('**')).replace(/\/+$/, '') || '*';
+  if (normalized.includes('*')) return normalized.slice(0, normalized.indexOf('*')).replace(/\/+$/, '') || '*';
+  return normalized.replace(/\/+$/, '');
+}
+
+function allowedPathKeys(task, mode) {
+  const keys = task.allowedPaths
+    .filter((item) => !isInternalQueuePath(item, mode))
+    .map(conflictKey)
+    .filter(Boolean);
+  return keys.length ? keys : ['*'];
+}
+
+function pathKeysOverlap(left, right) {
+  if (left.includes('*') || right.includes('*')) return true;
+  return left.some((a) => right.some((b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
+}
+
+function taskPathConflict(left, right, mode) {
+  return pathKeysOverlap(allowedPathKeys(left, mode), allowedPathKeys(right, mode));
+}
+
+function taskStatusById(tasks) {
+  return new Map(tasks.map((task) => [task.id, task.status]));
+}
+
+function dependenciesDone(task, statusById) {
+  return task.dependencyIds.every((id) => statusById.get(id) === 'DONE');
+}
+
+function createRunId() {
+  return new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace(/\.(\d+)Z$/, '-$1');
+}
+
+function branchSegment(value) {
+  return String(value).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'task';
+}
+
+function createMainTaskBranch(root, { allowDirty = false, requireClean = false } = {}) {
+  const dirtyStatus = gitStatusShort(root);
+  if (dirtyStatus && (requireClean || !allowDirty)) {
+    throw new Error([
+      'Queue runs require a clean Git working tree before creating the main task branch.',
+      'Commit or stash existing changes first, or rerun serial mode with --allow-dirty-start to include them in the next task commit.',
+      '',
+      dirtyStatus,
+    ].join('\n'));
+  }
+  const runId = createRunId();
+  const baseBranch = currentBranch(root);
+  const baseCommit = gitRef(root, 'HEAD');
+  const branchPrefix = `codex/queue/${runId}`;
+  const mainBranch = `${branchPrefix}/main`;
+  checkoutNewBranch(root, mainBranch, 'HEAD');
+  return { runId, baseBranch, baseCommit, branchPrefix, mainBranch, dirtyAtStart: Boolean(dirtyStatus) };
+}
+
+function isRunnableTask(task, statusById) {
+  if (task.status === 'DONE' || task.status === 'RUNNING') return false;
+  if (task.hasNonTaskPrerequisites) return task.status === 'READY' && dependenciesDone(task, statusById);
+  if (task.dependencyIds.length === 0) return task.status === 'READY';
+  return dependenciesDone(task, statusById);
+}
+
+function writeParallelState(root, state) {
+  writeText(pathsFor(root, state.mode).parallelState, JSON.stringify(state, null, 2));
+}
+
+function updateParallelState(root, state, note = '') {
+  state.updatedAt = new Date().toISOString();
+  if (note) state.lastNote = note;
+  writeParallelState(root, state);
+}
+
+function updateQueueStatuses(root, mode, updates, subject) {
+  if (!updates.size) return false;
+  const paths = pathsFor(root, mode);
+  const current = readText(paths.queue);
+  const next = updateQueueTaskStatuses(current, updates);
+  if (next === current) return false;
+  writeText(paths.queue, next);
+  commitAll(root, subject);
+  return true;
+}
+
+function syncAutoReadyTasks(root, mode) {
+  const paths = pathsFor(root, mode);
+  const tasks = parseQueueTasks(readText(paths.queue));
+  const statuses = taskStatusById(tasks);
+  const updates = new Map();
+  for (const task of tasks) {
+    if (task.status === 'BLOCKED' && task.dependencyIds.length > 0 && !task.hasNonTaskPrerequisites && dependenciesDone(task, statuses)) {
+      updates.set(task.id, 'READY');
+    }
+  }
+  updateQueueStatuses(root, mode, updates, 'queue: unlock ready tasks');
+}
+
+async function resolveMergeConflict(root, args, task, branch, mainRoot, iteration) {
+  const conflictFiles = unmergedFiles(root);
+  const resolverTask = {
+    id: `resolve-${task.id}`,
+    title: `Resolve merge conflict for ${task.title}`,
+    body: '',
+  };
+  const prompt = buildConflictResolutionPrompt(task, conflictFiles, branch);
+  const beforeNativeSessions = snapshotNativeSessions();
+  const result = await runCodex(root, prompt, { ...args, outputRoot: mainRoot }, iteration, resolverTask);
+  const nativeSession = findNewNativeSession(root, beforeNativeSessions);
+  appendNativeSessionLog(mainRoot, {
+    task: resolverTask,
+    session: nativeSession,
+    outputPath: result.outputPath,
+    codexCommand: args.codexCommand,
+    branch,
+    worktree: root,
+  });
+  if (result.status !== 0 || unmergedFiles(root).length) {
+    return false;
+  }
+  commitAll(root, `queue: resolve merge conflict for ${task.id}`, `Merged branch: ${branch}`);
+  return true;
+}
+
+async function mergeWithResolution(root, args, task, branch, mainRoot, iteration) {
+  const merge = mergeBranch(root, branch, `queue: merge ${task.id} ${task.title}`);
+  if (merge.status === 0) return true;
+  if (!unmergedFiles(root).length) {
+    throw new Error(merge.stderr.trim() || merge.stdout.trim() || `failed to merge ${branch}`);
+  }
+  const resolved = await resolveMergeConflict(root, args, task, branch, mainRoot, iteration);
+  if (resolved) return true;
+  git(root, ['merge', '--abort']);
+  return false;
+}
+
+async function prepareTaskWorktree(mainRoot, args, state, task, tasksById, iteration) {
+  const worktreePath = path.join(state.worktreeRoot, branchSegment(task.id));
+  const branch = `${state.branchPrefix}/${branchSegment(task.id)}`;
+  const dependencyBranches = task.dependencyIds
+    .map((id) => state.tasks[id]?.branch)
+    .filter(Boolean);
+  const startPoint = dependencyBranches.length === 1 ? dependencyBranches[0] : state.mainBranch;
+
+  addWorktree(mainRoot, worktreePath, branch, startPoint);
+
+  if (dependencyBranches.length > 1) {
+    for (const dependencyBranch of dependencyBranches) {
+      const dependencyTask = tasksById.get(Object.entries(state.tasks).find(([, info]) => info.branch === dependencyBranch)?.[0]) || task;
+      const merged = await mergeWithResolution(worktreePath, args, dependencyTask, dependencyBranch, mainRoot, iteration);
+      if (!merged) {
+        return { ok: false, worktreePath, branch, reason: `could not resolve merge conflict from ${dependencyBranch}` };
+      }
+    }
+  }
+
+  return { ok: true, worktreePath, branch };
+}
+
+async function runParallelWorker(mainRoot, args, state, task, tasksById, iteration, context) {
+  let prepared;
+  try {
+    prepared = await prepareTaskWorktree(mainRoot, args, state, task, tasksById, iteration);
+  } catch (error) {
+    return { task, ok: false, reason: error.message, setupFailed: true };
+  }
+  if (!prepared.ok) {
+    return { task, ok: false, reason: prepared.reason, branch: prepared.branch, worktreePath: prepared.worktreePath };
+  }
+
+  const { branch, worktreePath } = prepared;
+  state.tasks[task.id] = {
+    ...(state.tasks[task.id] || {}),
+    status: 'RUNNING',
+    branch,
+    worktree: worktreePath,
+    startedAt: new Date().toISOString(),
+    dependencies: task.dependencyIds,
+  };
+  updateParallelState(mainRoot, state, `started ${task.id}`);
+  commitAll(mainRoot, `queue: record ${task.id} started`);
+
+  const prompt = buildParallelTaskPrompt(worktreePath, task, context);
+  const beforeNativeSessions = snapshotNativeSessions();
+  const result = await runCodex(worktreePath, prompt, { ...args, outputRoot: mainRoot }, iteration, task);
+  const nativeSession = findNewNativeSession(worktreePath, beforeNativeSessions);
+  if (result.status !== 0) {
+    return { task, ok: false, status: result.status, reason: `Codex exited ${result.status}`, branch, worktreePath, outputPath: result.outputPath, nativeSession };
+  }
+
+  commitAll(worktreePath, `queue: complete ${task.id} ${task.title.replace(new RegExp(`^${task.id}\\s+`), '').trim()}`.slice(0, 100), [
+    `Task: ${task.title}`,
+    '',
+    'Committed automatically by codex-task-queue parallel worker.',
+  ].join('\n'));
+
+  return { task, ok: true, branch, worktreePath, outputPath: result.outputPath, nativeSession };
+}
+
+function printParallelDryRun(root, mode, maxParallel) {
+  const paths = pathsFor(root, mode);
+  const tasks = parseQueueTasks(readText(paths.queue));
+  console.log(`# codex-task-queue parallel dry run\n`);
+  console.log(`Max parallel: ${maxParallel}`);
+  for (const task of tasks) {
+    console.log(`- ${task.id}: ${task.status}; deps=${task.dependencyIds.join(',') || 'none'}; externalPrereqs=${task.hasNonTaskPrerequisites ? 'yes' : 'no'}; paths=${allowedPathKeys(task, mode).join(',')}`);
+  }
+}
+
+async function runParallelQueue(args) {
   const root = args.cwd;
   applyRunCountDefault(args);
   const { paths, product, mode } = ensureRunnableProject(root, args);
   await ensureGitForRun(root, args);
+
+  if (args.dryRun) {
+    printParallelDryRun(root, mode, args.maxParallel);
+    return;
+  }
+  if (!args.autoCommit) {
+    fail('Parallel queue runs require automatic commits. Rerun without --no-commit, or use --no-parallel for serial execution on a main task branch.', 1);
+  }
+  const {
+    runId,
+    baseBranch,
+    baseCommit,
+    branchPrefix,
+    mainBranch,
+  } = createMainTaskBranch(root, { requireClean: true });
+  const worktreeRoot = worktreeRootFor(root, runId);
+
+  const state = {
+    version: 1,
+    mode,
+    runId,
+    baseBranch,
+    baseCommit,
+    mainBranch,
+    branchPrefix,
+    worktreeRoot,
+    maxParallel: args.maxParallel,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    tasks: {},
+  };
+  updateParallelState(root, state, 'parallel run started');
+  appendRunLog(root, { task: null, status: 'parallel-start', note: `run ${runId}; main ${mainBranch}; max ${args.maxParallel}` });
+  commitAll(root, `queue: start parallel run ${runId}`, `Base branch: ${baseBranch}\nBase commit: ${baseCommit}`);
+
+  let completed = 0;
+  let iteration = 0;
+  const active = new Map();
+
+  while (completed < args.max) {
+    syncAutoReadyTasks(root, mode);
+    const queueText = readText(paths.queue);
+    const tasks = parseQueueTasks(queueText);
+    const tasksById = new Map(tasks.map((task) => [task.id, task]));
+    const statuses = taskStatusById(tasks);
+    const runnable = tasks
+      .filter((task) => !active.has(task.id))
+      .filter((task) => isRunnableTask(task, statuses));
+
+    for (const task of runnable) {
+      if (active.size >= args.maxParallel || completed + active.size >= args.max) break;
+      const activeTasks = [...active.values()].map((entry) => entry.task);
+      const conflicting = activeTasks.find((activeTask) => taskPathConflict(task, activeTask, mode));
+      if (conflicting) {
+        appendRunLog(root, {
+          task,
+          status: 'path-overlap-serialized',
+          note: `waiting for ${conflicting.id}; decoupling requires a narrow preprocessing task if this becomes a bottleneck`,
+        });
+        commitAll(root, `queue: record ${task.id} path overlap`);
+        continue;
+      }
+
+      iteration += 1;
+      updateQueueStatuses(root, mode, new Map([[task.id, 'RUNNING']]), `queue: mark ${task.id} running`);
+      const promise = runParallelWorker(root, args, state, task, tasksById, iteration, { mode, productPath: product.filePath });
+      active.set(task.id, { task, promise });
+    }
+
+    if (!active.size) {
+      console.log('No runnable parallel tasks found. Queue is blocked or complete.');
+      updateParallelState(root, state, 'no runnable tasks');
+      commitAll(root, 'queue: record parallel run idle');
+      return;
+    }
+
+    const result = await Promise.race([...active.values()].map((entry) => entry.promise));
+    active.delete(result.task.id);
+
+    checkoutBranch(root, mainBranch);
+
+    if (result.ok && !result.nativeSession && args.requireNativeSession) {
+      result.ok = false;
+      result.reason = 'No new Codex native session file detected';
+    }
+
+    if (!result.ok) {
+      state.tasks[result.task.id] = {
+        ...(state.tasks[result.task.id] || {}),
+        status: 'BLOCKED',
+        branch: result.branch || state.tasks[result.task.id]?.branch || null,
+        worktree: result.worktreePath || state.tasks[result.task.id]?.worktree || null,
+        blockedAt: new Date().toISOString(),
+        reason: result.reason || `worker failed with ${result.status || 'unknown status'}`,
+      };
+      updateParallelState(root, state, `blocked ${result.task.id}`);
+      appendRunLog(root, { task: result.task, status: 'blocked', outputPath: result.outputPath || '', note: state.tasks[result.task.id].reason });
+      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]), `queue: block ${result.task.id}`);
+      continue;
+    }
+
+    const merged = await mergeWithResolution(root, args, result.task, result.branch, root, iteration);
+    if (!merged) {
+      state.tasks[result.task.id] = {
+        ...(state.tasks[result.task.id] || {}),
+        status: 'BLOCKED',
+        branch: result.branch,
+        worktree: result.worktreePath,
+        blockedAt: new Date().toISOString(),
+        reason: `could not resolve merge conflict from ${result.branch}`,
+      };
+      updateParallelState(root, state, `merge blocked ${result.task.id}`);
+      appendRunLog(root, { task: result.task, status: 'merge-blocked', outputPath: result.outputPath, note: state.tasks[result.task.id].reason });
+      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]), `queue: block ${result.task.id}`);
+      continue;
+    }
+
+    state.tasks[result.task.id] = {
+      ...(state.tasks[result.task.id] || {}),
+      status: 'DONE',
+      branch: result.branch,
+      worktree: result.worktreePath,
+      completedAt: new Date().toISOString(),
+    };
+    updateParallelState(root, state, `completed ${result.task.id}`);
+    appendRunLog(root, { task: result.task, status: 'completed', outputPath: result.outputPath, note: `branch ${result.branch}; worktree ${result.worktreePath}` });
+    appendNativeSessionLog(root, {
+      task: result.task,
+      session: result.nativeSession,
+      outputPath: result.outputPath,
+      codexCommand: args.codexCommand,
+      branch: result.branch,
+      worktree: result.worktreePath,
+    });
+    updateQueueStatuses(root, mode, new Map([[result.task.id, 'DONE']]), `queue: mark ${result.task.id} done`);
+    syncAutoReadyTasks(root, mode);
+    removeWorktree(root, result.worktreePath);
+    completed += 1;
+  }
+
+  console.log(`Reached max run count: ${args.max}`);
+}
+
+async function runSerialQueue(args) {
+  const root = args.cwd;
+  applyRunCountDefault(args);
+  const { paths, product, mode } = ensureRunnableProject(root, args);
+  await ensureGitForRun(root, args);
+  let mainRun = null;
+  if (!args.dryRun && args.autoCommit && isGitRepo(root)) {
+    try {
+      mainRun = createMainTaskBranch(root, { allowDirty: args.allowDirtyStart });
+    } catch (error) {
+      fail(error.message, 1);
+    }
+    console.log(`Created main task branch: ${mainRun.mainBranch}`);
+    if (!mainRun.dirtyAtStart) {
+      appendRunLog(root, { task: null, status: 'serial-start', note: `run ${mainRun.runId}; main ${mainRun.mainBranch}` });
+      commitAll(root, `queue: start serial run ${mainRun.runId}`, `Base branch: ${mainRun.baseBranch}\nBase commit: ${mainRun.baseCommit}`);
+    }
+  }
 
   let previousTaskTitle = '';
   let completed = 0;
@@ -1556,7 +2251,14 @@ async function runQueue(args) {
       outputPath: result.outputPath,
       note: `${nativeSession ? `native ${nativeSession.id}; ` : 'native session not detected; '}${nextTask ? `next ${nextTask.title}` : 'no next READY task'}`,
     });
-    const nativeRecorded = appendNativeSessionLog(root, { task, session: nativeSession, outputPath: result.outputPath });
+    const nativeRecorded = appendNativeSessionLog(root, {
+      task,
+      session: nativeSession,
+      outputPath: result.outputPath,
+      codexCommand: args.codexCommand,
+      branch: mainRun?.mainBranch || currentBranch(root),
+      worktree: root,
+    });
     if (!nativeRecorded && args.requireNativeSession) {
       fail(`No Codex native session id was detected for ${task.title}.\nStopping because native session persistence is required. Rerun with --no-native-session-required only for diagnosis.`, 1);
     }
@@ -1575,6 +2277,14 @@ async function runQueue(args) {
   }
 
   console.log(`Reached max run count: ${args.max}`);
+}
+
+async function runQueue(args) {
+  if (args.parallel && args.maxParallel > 1) {
+    await runParallelQueue(args);
+  } else {
+    await runSerialQueue(args);
+  }
 }
 
 async function main() {
