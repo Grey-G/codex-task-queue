@@ -1,22 +1,113 @@
 # Codex Task Queue
 
+![Node.js 18+](https://img.shields.io/badge/node-%3E%3D18-43853d)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Codex workflow](https://img.shields.io/badge/Codex-workflow-111827)
+![Parallel subagents](https://img.shields.io/badge/parallel-subagents-7c3aed)
+
 ## Core Responsibility / 核心职责
 
-**Create executable Codex workflows for repository work.**
+**Turn product and development docs into executable Codex workflows, then run them with parallel subagents.**
 
-**为仓库工作创建可执行的 Codex 工作流。**
+**把产品文档和开发文档自动转换成可执行的 Codex 工作流文档，并开启多个子 agent 并行完成工作流。**
 
-`codex-task-queue` is not mainly a generic task runner. Its core job is to turn loose product requests, bug lists, and maintenance goals into a documented, reviewable, resumable workflow that Codex can execute safely.
+`codex-task-queue` is not mainly a generic task runner. Its core advantage is the full workflow loop:
 
-`codex-task-queue` 不是普通的任务运行器。它的核心职责是把零散的产品需求、bug 列表和维护目标，整理成一套有文档、可审查、可恢复、能让 Codex 安全执行的工作流。
+1. Read product docs, development docs, bug lists, and repository context.
+2. Generate workflow documents such as `docs/PRODUCT.md`, `docs/TASK_QUEUE.md`, `docs/PATCH_QUEUE.md`, and `docs/SESSION_RUNBOOK.md`.
+3. Split the work into bounded, reviewable tasks.
+4. Start multiple Codex subagents in separate Git worktrees for independent `READY` tasks.
+5. Preserve handoffs, commits, queue state, and native Codex session history.
+
+`codex-task-queue` 不是普通的任务运行器。它最核心的优势是一整套闭环：
+
+1. 读取产品文档、开发文档、bug 列表和仓库上下文。
+2. 自动生成 `docs/PRODUCT.md`、`docs/TASK_QUEUE.md`、`docs/PATCH_QUEUE.md`、`docs/SESSION_RUNBOOK.md` 等工作流文档。
+3. 把工作拆成边界清晰、可审查的任务。
+4. 对互相独立的 `READY` 任务，在不同 Git worktree 中开启多个 Codex 子 agent 并行执行。
+5. 保留 handoff、commit、队列状态和原生 Codex session 历史。
 
 The queue is only the workflow format. The workflow is the product.
 
 队列只是工作流的落地格式。真正的产品是这套工作流。
 
+## Why This Exists
+
+Codex is powerful for one-off changes, but larger repository work needs more structure:
+
+- product and development docs must become executable implementation steps;
+- long tasks need durable context instead of one chat thread;
+- independent work should run in parallel without mixing changes;
+- every automated task needs a handoff, validation notes, and a commit boundary.
+
+`codex-task-queue` adds that workflow layer. It creates the workflow docs first, then uses Codex subagents to execute the workflow through scoped tasks.
+
+## Before / After
+
+| Before | After |
+| --- | --- |
+| Paste a long product request into one Codex chat | Generate `docs/PRODUCT.md`, `docs/TASK_QUEUE.md`, and `docs/SESSION_RUNBOOK.md` |
+| Manually decide what to do next | Run `next` to preview the next executable task |
+| One agent works serially through everything | Independent `READY` tasks can run through parallel Codex subagents |
+| Changes pile up in one checkout | Each subagent works in its own Git worktree |
+| Hard to resume or audit later | Handoffs, queue state, commits, and native Codex sessions are preserved |
+
+## 60-Second Demo
+
+From a target repository:
+
+```bash
+# 1. Inspect the repo and current workflow docs.
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor
+
+# 2. Generate draft workflow docs from product/dev material.
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init
+
+# 3. Preview the next executable task after review/confirmation.
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs next
+
+# 4. Run the workflow with parallel Codex subagents.
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --max-parallel 5
+```
+
+Maintenance mode for bug batches:
+
+```bash
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init --mode maintenance
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --mode maintenance --max-parallel 5
+```
+
+## Real Example
+
+Input material:
+
+```text
+We have a product doc, a few bug reports, and a repo with failing UI polish tasks.
+Split the work safely, keep unrelated fixes separate, and let Codex run what can be parallelized.
+```
+
+Generated workflow docs:
+
+```text
+docs/PRODUCT.md
+docs/TASK_QUEUE.md
+docs/PATCH_QUEUE.md
+docs/SESSION_RUNBOOK.md
+docs/handoffs/<task-id>.md
+```
+
+Execution shape:
+
+```text
+main workflow branch
+  worker T1 -> separate Git worktree -> Codex subagent -> handoff + commit
+  worker T2 -> separate Git worktree -> Codex subagent -> handoff + commit
+  worker T3 -> waits for T1/T2 prerequisites, then unlocks
+```
+
 ## Overview
 
-`codex-task-queue` inspects the repo, drafts workflow docs, splits the work into bounded steps, runs only explicit `READY` steps, and preserves handoffs/history.
+`codex-task-queue` inspects the repo, drafts workflow docs from project material, splits the work into bounded steps, runs explicit `READY` steps through one or more Codex subagents, and preserves handoffs/history.
 
 It is intentionally conservative: draft first, confirm before execution, and keep each task scoped to one Codex session and one Git commit.
 
@@ -198,9 +289,9 @@ Codex discovers the skill from `SKILL.md`. The YAML frontmatter names the skill 
 
 说白了，`codex-task-queue` 是一个给 Codex 创建仓库工作流的本地 skill。
 
-它最核心的职责不是“跑任务”，而是把零散的产品需求、bug 列表和维护目标，整理成一套有文档、可审查、可恢复、能让 Codex 安全执行的工作流。
+它最核心的职责不是“跑任务”，而是从产品文档、开发文档、bug 列表和仓库上下文里生成工作流文档，再开启多个 Codex 子 agent 完成这套工作流。
 
-它会先检查仓库，再生成工作流文档草稿，把工作拆成有边界的步骤，只执行明确标记为 `READY` 的步骤，并保留 handoff 和运行历史。
+它会先检查仓库，再生成工作流文档草稿，把工作拆成有边界的步骤，对互相独立的 `READY` 任务并行启动子 agent，并保留 handoff 和运行历史。
 
 队列只是这个工作流的落地格式。真正的产品是这套工作流。
 
