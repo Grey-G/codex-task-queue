@@ -69,6 +69,14 @@ Codex Task Queue turns product docs, development docs, and bug lists into execut
 
 ## Launch Post
 
+Use the complete copy set in:
+
+```text
+docs/LAUNCH_COPY.md
+```
+
+Default post:
+
 ```text
 I built Codex Task Queue: a workflow layer for Codex that turns product docs, development docs, and bug lists into executable workflow docs.
 
