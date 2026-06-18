@@ -57,24 +57,27 @@ Codex is powerful for one-off changes, but larger repository work needs more str
 From a target repository:
 
 ```bash
+# Install from GitHub once.
+npm install -g github:Grey-G/codex-task-queue
+
 # 1. Inspect the repo and current workflow docs.
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor
+codex-task-queue doctor
 
 # 2. Generate draft workflow docs from product/dev material.
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init
+codex-task-queue init
 
 # 3. Preview the next executable task after review/confirmation.
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs next
+codex-task-queue next
 
 # 4. Run the workflow with parallel Codex subagents.
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --max-parallel 5
+codex-task-queue run --max-parallel 5
 ```
 
 Maintenance mode for bug batches:
 
 ```bash
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init --mode maintenance
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --mode maintenance --max-parallel 5
+codex-task-queue init --mode maintenance
+codex-task-queue run --mode maintenance --max-parallel 5
 ```
 
 ## Real Example
@@ -142,40 +145,70 @@ On macOS, the CLI defaults to the Codex Desktop app binary when present:
 
 Otherwise it uses `codex` from `PATH`. You can override this with `--codex <path>` or `CODEX_TASK_QUEUE_CODEX`.
 
+## Install
+
+Install directly from GitHub:
+
+```bash
+npm install -g github:Grey-G/codex-task-queue
+codex-task-queue help
+```
+
+Run once without a global install:
+
+```bash
+npx --yes github:Grey-G/codex-task-queue doctor
+```
+
+Use a local clone while developing:
+
+```bash
+git clone https://github.com/Grey-G/codex-task-queue.git
+cd codex-task-queue
+npm link
+codex-task-queue help
+```
+
+Fallback without installing:
+
+```bash
+node /path/to/codex-task-queue/scripts/codex-task-queue.mjs help
+```
+
 ## Quick Start
 
 Run commands from the repository you want to manage, not necessarily from this skill repository:
 
 ```bash
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs next
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --max 1
+codex-task-queue doctor
+codex-task-queue init
+codex-task-queue next
+codex-task-queue run --max 1
 ```
 
 For maintenance queues:
 
 ```bash
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor --mode maintenance
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init --mode maintenance
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --mode maintenance --max 1
+codex-task-queue doctor --mode maintenance
+codex-task-queue init --mode maintenance
+codex-task-queue run --mode maintenance --max 1
 ```
 
 Useful targeting option:
 
 ```bash
-node scripts/codex-task-queue.mjs doctor --cwd /path/to/project
+codex-task-queue doctor --cwd /path/to/project
 ```
 
 ## Command Summary
 
 ```bash
-node scripts/codex-task-queue.mjs help
-node scripts/codex-task-queue.mjs doctor
-node scripts/codex-task-queue.mjs init
-node scripts/codex-task-queue.mjs next
-node scripts/codex-task-queue.mjs run
-node scripts/codex-task-queue.mjs history
+codex-task-queue help
+codex-task-queue doctor
+codex-task-queue init
+codex-task-queue next
+codex-task-queue run
+codex-task-queue history
 ```
 
 Common options:
@@ -196,7 +229,7 @@ Common options:
 - `--service-tier <tier>` or `--speed <tier>`: override service tier.
 - `--codex <path>`: use a specific Codex CLI binary.
 
-Run `node scripts/codex-task-queue.mjs help` for the full option list.
+Run `codex-task-queue help` for the full option list.
 
 ## Project Mode Flow
 
@@ -330,38 +363,44 @@ tests/                           Node 测试
 
 ### 快速开始
 
+先从 GitHub 安装：
+
+```bash
+npm install -g github:Grey-G/codex-task-queue
+```
+
 这些命令应该在你要管理的目标仓库里执行，不一定是在这个 skill 仓库里执行：
 
 ```bash
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs next
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --max 1
+codex-task-queue doctor
+codex-task-queue init
+codex-task-queue next
+codex-task-queue run --max 1
 ```
 
 维护模式：
 
 ```bash
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs doctor --mode maintenance
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs init --mode maintenance
-node /path/to/codex-task-queue/scripts/codex-task-queue.mjs run --mode maintenance --max 1
+codex-task-queue doctor --mode maintenance
+codex-task-queue init --mode maintenance
+codex-task-queue run --mode maintenance --max 1
 ```
 
 指定目标仓库：
 
 ```bash
-node scripts/codex-task-queue.mjs doctor --cwd /path/to/project
+codex-task-queue doctor --cwd /path/to/project
 ```
 
 ### 命令概览
 
 ```bash
-node scripts/codex-task-queue.mjs help
-node scripts/codex-task-queue.mjs doctor
-node scripts/codex-task-queue.mjs init
-node scripts/codex-task-queue.mjs next
-node scripts/codex-task-queue.mjs run
-node scripts/codex-task-queue.mjs history
+codex-task-queue help
+codex-task-queue doctor
+codex-task-queue init
+codex-task-queue next
+codex-task-queue run
+codex-task-queue history
 ```
 
 常用参数：
@@ -385,7 +424,7 @@ node scripts/codex-task-queue.mjs history
 完整参数可以运行：
 
 ```bash
-node scripts/codex-task-queue.mjs help
+codex-task-queue help
 ```
 
 ### 项目模式流程

@@ -52,13 +52,13 @@ assets/social-preview.svg
 Create a GitHub release from:
 
 ```text
-.github/releases/v0.5.0.md
+.github/releases/v0.5.1.md
 ```
 
 Suggested tag:
 
 ```text
-v0.5.0
+v0.5.1
 ```
 
 ## Short Pitch

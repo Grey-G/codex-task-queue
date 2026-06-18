@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const DEFAULT_MODEL = 'gpt-5.5';
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const DEFAULT_SERVICE_TIER = 'standard';
@@ -1636,7 +1636,7 @@ function printHelp() {
   console.log(`codex-task-queue ${VERSION}
 
 Usage:
-  node scripts/codex-task-queue.mjs <doctor|init|next|run|history> [options]
+  codex-task-queue <doctor|init|next|run|history> [options]
 
 Options:
   --cwd <dir>                    Target project root.

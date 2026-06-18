@@ -1,0 +1,46 @@
+{
+  "name": "codex-task-queue",
+  "version": "0.5.1",
+  "description": "Turn product and development docs into executable Codex workflows, then run them with parallel subagents.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "codex-task-queue": "scripts/codex-task-queue.mjs"
+  },
+  "files": [
+    "agents/",
+    "references/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "codex",
+    "codex-cli",
+    "openai",
+    "ai-agents",
+    "multi-agent",
+    "subagents",
+    "workflow-automation",
+    "agent-workflows",
+    "developer-tools",
+    "cli",
+    "task-queue",
+    "git-worktree"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Grey-G/codex-task-queue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Grey-G/codex-task-queue/issues"
+  },
+  "homepage": "https://github.com/Grey-G/codex-task-queue#readme"
+}
