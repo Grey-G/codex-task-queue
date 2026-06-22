@@ -86,13 +86,15 @@ Status values:
 Queue rules:
 
 - Parallel execution is the default. The runner creates a main task branch, executes independent tasks in separate worktrees, and merges successful branches back into the main task branch.
-- `--max-parallel` defaults to `5`; `--no-parallel` or `--max-parallel 1` uses the serial execution loop on the run's main task branch.
+- `--max-parallel` defaults to `5`; `--max-parallel 1` still uses the parallel coordinator and a worker worktree, but runs only one worker at a time.
+- `--no-parallel` uses the legacy serial execution loop on the run's main task branch.
 - In parallel mode, tasks whose `Prerequisites` contain only completed task ids can be unlocked automatically.
 - In serial mode, the runner executes only the first `READY` task per iteration, then rereads the queue.
 - If no run count is specified, the runner continues until the queue is blocked, complete, or a task fails. Use `--max 1` for a single-task run.
 - Each task should fit in one Codex session and one Git commit.
 - Each completed task writes `docs/handoffs/<task-id>.md`. In parallel mode, the coordinator marks tasks `DONE` and unlocks runnable dependents; workers do not edit queue status.
 - Draft queues must include `Queue status: DRAFT` and should not contain executable `READY` implementation tasks.
+- For automatic unlocks, write `Prerequisites` as task ids only, such as `A1` or `A1, A2`. Put user decisions, external evidence, or manual confirmation requirements in a separate task body or leave that task explicitly `READY` only after confirmation.
 - Patch tasks should include `Issue / Evidence`, `Expected`, and `Validation` fields whenever possible.
 - For loose bug lists, create a `P0` triage task first, then split the work into independent patch tasks.
 - A task must stop any long-running process it started. If it intentionally leaves one running, the handoff must record the command, PID or port, and reason.

@@ -1,6 +1,6 @@
 {
   "name": "codex-task-queue",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Turn product and development docs into executable Codex workflows, then run them with parallel subagents.",
   "license": "MIT",
   "type": "module",

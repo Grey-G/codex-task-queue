@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const DEFAULT_MODEL = 'gpt-5.5';
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const DEFAULT_SERVICE_TIER = 'standard';
@@ -1646,8 +1646,8 @@ Options:
   --runner auto|app-server|exec  Default: auto.
   --allow-exec-fallback          Let auto fall back to invisible codex exec when app-server cannot start.
   --max <n>                      Run up to n READY tasks. Use --max 1 for one task only.
-  --max-parallel <n>             Default: ${DEFAULT_MAX_PARALLEL}. Parallel worker limit.
-  --no-parallel                  Use the serial execution loop on a main task branch.
+  --max-parallel <n>             Default: ${DEFAULT_MAX_PARALLEL}. Worker limit; 1 still uses a worktree.
+  --no-parallel                  Use the legacy serial loop in the current checkout.
   --until-blocked                Run until no READY task remains or a task fails. Default when no --max is passed.
   --dry-run                      Print prompts without starting Codex.
   --no-commit                    Disable automatic task commits.
@@ -1686,7 +1686,7 @@ function printDoctor(args) {
   console.log(`Git repository: ${gitRepo ? 'yes' : 'no'}`);
   console.log(`Git working tree: ${gitRepo ? (dirty ? 'dirty' : 'clean') : 'not applicable'}`);
   console.log(`Runner: ${args.runner}`);
-  console.log(`Parallel: ${args.parallel && args.maxParallel > 1 ? `enabled (max ${args.maxParallel})` : 'disabled'}`);
+  console.log(`Parallel coordinator: ${args.parallel ? `enabled (max workers ${args.maxParallel})` : 'disabled (--no-parallel)'}`);
   console.log(`Exec fallback: ${args.allowExecFallback ? 'enabled' : 'disabled'}`);
   if (args.mode === 'project') {
     console.log(`Product doc: ${product.executable ? `executable (${rel(args.cwd, product.filePath)})` : product.exists ? `present but not executable (${rel(args.cwd, product.filePath)})` : 'missing'}`);
@@ -1698,6 +1698,10 @@ function printDoctor(args) {
   for (const reason of queue.reasons) console.log(`  - ${reason}`);
   console.log(`Runbook: ${fileExists(paths.runbook) ? 'present' : 'missing'}`);
   console.log(`First READY task: ${queue.ready ? queue.ready.title : 'none'}`);
+  if (queue.exists) {
+    const tasks = parseQueueTasks(readMaybe(paths.queue));
+    printExternalPrereqHint(externalPrereqBlockedTasks(tasks, taskStatusById(tasks)));
+  }
 }
 
 async function initProject(args) {
@@ -1865,6 +1869,23 @@ function taskStatusById(tasks) {
 
 function dependenciesDone(task, statusById) {
   return task.dependencyIds.every((id) => statusById.get(id) === 'DONE');
+}
+
+function externalPrereqBlockedTasks(tasks, statusById) {
+  return tasks.filter((task) => (
+    task.status === 'BLOCKED'
+    && task.hasNonTaskPrerequisites
+    && dependenciesDone(task, statusById)
+  ));
+}
+
+function printExternalPrereqHint(tasks) {
+  if (!tasks.length) return;
+  console.log('Blocked tasks with non-task prerequisites will not auto-unlock:');
+  for (const task of tasks.slice(0, 8)) {
+    console.log(`  - ${task.id}: Prerequisites: ${task.rawPrerequisites}`);
+  }
+  console.log('Use task ids only for automatic unlocks, or mark the task READY after the external decision is satisfied.');
 }
 
 function createRunId() {
@@ -2122,6 +2143,7 @@ async function runParallelQueue(args) {
 
     if (!active.size) {
       console.log('No runnable parallel tasks found. Queue is blocked or complete.');
+      printExternalPrereqHint(externalPrereqBlockedTasks(tasks, statuses));
       updateParallelState(root, state, 'no runnable tasks');
       commitAll(root, 'queue: record parallel run idle');
       return;
@@ -2280,7 +2302,7 @@ async function runSerialQueue(args) {
 }
 
 async function runQueue(args) {
-  if (args.parallel && args.maxParallel > 1) {
+  if (args.parallel) {
     await runParallelQueue(args);
   } else {
     await runSerialQueue(args);

@@ -183,7 +183,7 @@ Run commands from the repository you want to manage, not necessarily from this s
 codex-task-queue doctor
 codex-task-queue init
 codex-task-queue next
-codex-task-queue run --max 1
+codex-task-queue run
 ```
 
 For maintenance queues:
@@ -191,7 +191,7 @@ For maintenance queues:
 ```bash
 codex-task-queue doctor --mode maintenance
 codex-task-queue init --mode maintenance
-codex-task-queue run --mode maintenance --max 1
+codex-task-queue run --mode maintenance
 ```
 
 Useful targeting option:
@@ -217,8 +217,8 @@ Common options:
 - `--mode project|maintenance`: choose queue type. Default is `project`.
 - `--maintenance`: alias for `--mode maintenance`.
 - `--max <n>`: run up to `n` READY tasks. Use `--max 1` for one task only.
-- `--max-parallel <n>`: cap parallel task workers. Default is `5`.
-- `--no-parallel`: use serial execution.
+- `--max-parallel <n>`: cap parallel task workers. Default is `5`; `--max-parallel 1` still uses a worker worktree.
+- `--no-parallel`: use the legacy serial loop in the current checkout.
 - `--until-blocked`: run until no READY task remains or a task fails.
 - `--runner auto|app-server|exec`: default is `auto`.
 - `--allow-exec-fallback`: allow invisible `codex exec` fallback when app-server cannot start.
@@ -248,7 +248,7 @@ Typical flow:
 4. Remove draft status only after user confirmation.
 5. Mark the first runnable task or independent task group as `READY`.
 6. Run `next` to preview the prompt.
-7. Run `run --max 1` for a single task, or `run` / `run --until-blocked` for a queue pass.
+7. Run `run` / `run --until-blocked` for a queue pass, or `run --max 1` only when you explicitly want a single task.
 8. Review handoffs, commits, and queue status before continuing.
 
 ## Maintenance Mode Flow
@@ -266,7 +266,7 @@ Typical flow:
 3. Fill the draft patch queue with issue evidence, expected behavior, validation, severity, and allowed paths.
 4. Remove draft status only after the user confirms the patch list.
 5. Mark independent first patches as `READY`.
-6. Run `run --mode maintenance --max 1` or a bounded batch.
+6. Run `run --mode maintenance` for a queue pass, or use `--max 1` only when you explicitly want a single patch.
 
 Maintenance tasks should stay narrowly scoped. `Allowed paths` are treated as a hard fence.
 
@@ -277,7 +277,8 @@ Maintenance tasks should stay narrowly scoped. `Allowed paths` are treated as a 
 - Parallel execution is the default.
 - Independent READY tasks can run concurrently in separate Git worktrees.
 - Dependent tasks unlock after their prerequisites are `DONE`.
-- Serial mode executes only the first READY task, then rereads the queue.
+- `--max-parallel 1` still uses a worker worktree; it limits concurrency without making the coordinator implement the task.
+- `--no-parallel` serial mode executes in the current checkout and should be reserved for deliberate diagnosis or legacy workflows.
 - Each task should fit in one Codex session and one Git commit.
 - Completed tasks write a handoff under `docs/handoffs/`.
 - Queue runs prefer visible Codex Desktop/app-server sessions.
@@ -375,7 +376,7 @@ npm install -g github:Grey-G/codex-task-queue
 codex-task-queue doctor
 codex-task-queue init
 codex-task-queue next
-codex-task-queue run --max 1
+codex-task-queue run
 ```
 
 维护模式：
@@ -383,7 +384,7 @@ codex-task-queue run --max 1
 ```bash
 codex-task-queue doctor --mode maintenance
 codex-task-queue init --mode maintenance
-codex-task-queue run --mode maintenance --max 1
+codex-task-queue run --mode maintenance
 ```
 
 指定目标仓库：
@@ -409,8 +410,8 @@ codex-task-queue history
 - `--mode project|maintenance`：选择队列类型，默认是 `project`。
 - `--maintenance`：`--mode maintenance` 的别名。
 - `--max <n>`：最多执行 `n` 个 READY 任务。只跑一个任务时用 `--max 1`。
-- `--max-parallel <n>`：限制并行任务数，默认是 `5`。
-- `--no-parallel`：使用串行执行。
+- `--max-parallel <n>`：限制并行任务数，默认是 `5`；`--max-parallel 1` 仍然会使用 worker worktree。
+- `--no-parallel`：使用当前 checkout 的旧串行执行。
 - `--until-blocked`：一直执行到没有 READY 任务或某个任务失败。
 - `--runner auto|app-server|exec`：默认是 `auto`。
 - `--allow-exec-fallback`：当 app-server 启动失败时，允许回退到不可见的 `codex exec`。
@@ -444,7 +445,7 @@ codex-task-queue help
 4. 只有在用户确认后，才移除草稿状态。
 5. 把第一个可执行任务或一组互相独立的任务标记为 `READY`。
 6. 运行 `next` 预览任务 prompt。
-7. 用 `run --max 1` 跑单个任务，或用 `run` / `run --until-blocked` 跑一轮队列。
+7. 用 `run` / `run --until-blocked` 跑一轮队列；只有明确想跑单个任务时才用 `run --max 1`。
 8. 继续前检查 handoff、commit 和队列状态。
 
 ### 维护模式流程
@@ -462,7 +463,7 @@ codex-task-queue help
 3. 在 patch 队列草稿里补充问题证据、期望行为、验证方式、严重程度和允许修改路径。
 4. 只有在用户确认 patch 列表后，才移除草稿状态。
 5. 把互相独立的首批 patch 标记为 `READY`。
-6. 运行 `run --mode maintenance --max 1` 或有边界的批量执行。
+6. 运行 `run --mode maintenance` 跑一轮队列；只有明确想跑单个 patch 时才加 `--max 1`。
 
 维护任务应该保持窄范围。`Allowed paths` 是硬边界。
 
@@ -473,7 +474,8 @@ codex-task-queue help
 - 默认并行执行。
 - 互相独立的 READY 任务可以在不同 Git worktree 里并行执行。
 - 依赖任务会在前置任务 `DONE` 后解锁。
-- 串行模式每次只执行第一个 READY 任务，然后重新读取队列。
+- `--max-parallel 1` 仍然使用 worker worktree，只是并发数限制为 1。
+- `--no-parallel` 会在当前 checkout 串行执行，主要用于明确的诊断或旧流程。
 - 每个任务应该能放进一个 Codex session 和一个 Git commit。
 - 完成的任务要在 `docs/handoffs/` 下写 handoff。
 - 队列运行默认优先使用 Codex Desktop/app-server 的可见 session。

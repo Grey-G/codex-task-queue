@@ -108,3 +108,33 @@ test('parallel fake run creates a main branch, completes dependencies, and remov
   assert.equal(state.tasks.T3.status, 'DONE');
   assert.equal(state.tasks.T4, undefined);
 });
+
+test('max-parallel 1 still uses worker worktrees and defaults to until blocked', () => {
+  const root = makeProject();
+  execFileSync('node', [
+    script,
+    'run',
+    '--cwd',
+    root,
+    '--max-parallel',
+    '1',
+    '--no-native-session-required',
+  ], {
+    env: { ...process.env, CODEX_TASK_QUEUE_FAKE_RUNNER: '1' },
+    stdio: 'pipe',
+  });
+
+  const queue = fs.readFileSync(path.join(root, 'docs', 'TASK_QUEUE.md'), 'utf8');
+  assert.match(queue, /## T1 First[\s\S]*?Status: DONE/);
+  assert.match(queue, /## T2 Second[\s\S]*?Status: DONE/);
+  assert.match(queue, /## T3 Depends[\s\S]*?Status: DONE/);
+  assert.match(queue, /## T4 Needs Decision[\s\S]*?Status: BLOCKED/);
+
+  const state = JSON.parse(fs.readFileSync(path.join(root, '.codex-queue', 'parallel-state.json'), 'utf8'));
+  assert.equal(state.maxParallel, 1);
+  assert.notEqual(state.tasks.T1.worktree, root);
+  assert.match(state.tasks.T1.worktree, /\.codex-task-worktrees/);
+
+  const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: root, encoding: 'utf8' });
+  assert.equal((worktrees.match(/^worktree /gm) || []).length, 1);
+});
