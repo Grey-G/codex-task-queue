@@ -103,8 +103,8 @@ Execution shape:
 
 ```text
 main workflow branch
-  worker T1 -> separate Git worktree -> Codex subagent -> handoff + commit
-  worker T2 -> separate Git worktree -> Codex subagent -> handoff + commit
+  worker T1 -> separate Git worktree -> Codex subagent -> handoff -> coordinator squash commit
+  worker T2 -> separate Git worktree -> Codex subagent -> handoff -> coordinator squash commit
   worker T3 -> waits for T1/T2 prerequisites, then unlocks
 ```
 
@@ -279,7 +279,7 @@ Maintenance tasks should stay narrowly scoped. `Allowed paths` are treated as a 
 - Dependent tasks unlock after their prerequisites are `DONE`.
 - `--max-parallel 1` still uses a worker worktree; it limits concurrency without making the coordinator implement the task.
 - `--no-parallel` serial mode executes in the current checkout and should be reserved for deliberate diagnosis or legacy workflows.
-- Each task should fit in one Codex session and one Git commit.
+- Each task should fit in one Codex session and one Git commit; parallel workers are squashed into one coordinator commit when the task completes.
 - Completed tasks write a handoff under `docs/handoffs/`.
 - Queue runs prefer visible Codex Desktop/app-server sessions.
 - Invisible `codex exec` fallback must be explicit with `--allow-exec-fallback`.
@@ -476,7 +476,7 @@ codex-task-queue help
 - 依赖任务会在前置任务 `DONE` 后解锁。
 - `--max-parallel 1` 仍然使用 worker worktree，只是并发数限制为 1。
 - `--no-parallel` 会在当前 checkout 串行执行，主要用于明确的诊断或旧流程。
-- 每个任务应该能放进一个 Codex session 和一个 Git commit。
+- 每个任务应该能放进一个 Codex session 和一个 Git commit；并行 worker 的结果会在任务完成时由 coordinator squash 成一次提交。
 - 完成的任务要在 `docs/handoffs/` 下写 handoff。
 - 队列运行默认优先使用 Codex Desktop/app-server 的可见 session。
 - 不可见的 `codex exec` 回退必须通过 `--allow-exec-fallback` 明确开启。

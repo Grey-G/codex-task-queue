@@ -91,6 +91,10 @@ test('parallel fake run creates a main branch, completes dependencies, and remov
 
   const branch = execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8' }).trim();
   assert.match(branch, /^codex\/queue\/\d{8}-\d{6}-\d{3}\/main$/);
+  const commitCount = Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim());
+  assert.equal(commitCount, 4);
+  const mergeCommitCount = Number(execFileSync('git', ['rev-list', '--merges', '--count', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim());
+  assert.equal(mergeCommitCount, 0);
 
   const queue = fs.readFileSync(path.join(root, 'docs', 'TASK_QUEUE.md'), 'utf8');
   assert.match(queue, /## T1 First[\s\S]*?Status: DONE/);
@@ -129,6 +133,8 @@ test('max-parallel 1 still uses worker worktrees and defaults to until blocked',
   assert.match(queue, /## T2 Second[\s\S]*?Status: DONE/);
   assert.match(queue, /## T3 Depends[\s\S]*?Status: DONE/);
   assert.match(queue, /## T4 Needs Decision[\s\S]*?Status: BLOCKED/);
+  const commitCount = Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim());
+  assert.equal(commitCount, 4);
 
   const state = JSON.parse(fs.readFileSync(path.join(root, '.codex-queue', 'parallel-state.json'), 'utf8'));
   assert.equal(state.maxParallel, 1);

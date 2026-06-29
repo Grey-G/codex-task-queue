@@ -85,7 +85,7 @@ Status values:
 
 Queue rules:
 
-- Parallel execution is the default. The runner creates a main task branch, executes independent tasks in separate worktrees, and merges successful branches back into the main task branch.
+- Parallel execution is the default. The runner creates a main task branch, executes independent tasks in separate worktrees, and squashes each successful worker result into one coordinator commit on the main task branch.
 - `--max-parallel` defaults to `5`; `--max-parallel 1` still uses the parallel coordinator and a worker worktree, but runs only one worker at a time.
 - `--no-parallel` uses the legacy serial execution loop on the run's main task branch.
 - In parallel mode, tasks whose `Prerequisites` contain only completed task ids can be unlocked automatically.

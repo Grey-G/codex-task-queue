@@ -24,7 +24,7 @@ Choose the mode first:
 4. If the project is not a Git repository, explain that task commits need Git. Only initialize Git after the user confirms; use `init --yes` when confirmation is already explicit.
 5. If the user asks to start or run the queue, do not implement the queue task directly in the current assistant turn. Use the runner as the coordinator; it starts worker Codex sessions and the current assistant monitors the queue, handoffs, commits, and failures.
 6. If the user does not specify a run count, default to running until the queue is blocked or complete.
-7. Queue execution is parallel by default: each run creates a main task branch, schedules READY tasks in Git worktrees, and merges successful task branches back into the main task branch. `--max-parallel 1` still uses worker worktrees; it only limits concurrency to one worker.
+7. Queue execution is parallel by default: each run creates a main task branch, schedules READY tasks in Git worktrees, and squashes each successful worker result into one coordinator commit when that task completes. `--max-parallel 1` still uses worker worktrees; it only limits concurrency to one worker.
 8. Use `run --max 1` only when the user explicitly wants one task, `run --max N` for a bounded batch, or plain `run` / `run --until-blocked` to keep running.
 
 ## Commands

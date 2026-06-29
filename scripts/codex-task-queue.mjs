@@ -310,8 +310,12 @@ function checkoutBranch(root, branch) {
   gitRequire(root, ['switch', branch], `failed to switch to branch ${branch}`);
 }
 
-function mergeBranch(root, branch, message) {
-  return git(root, ['merge', '--no-ff', '--no-edit', '-m', message, branch]);
+function squashMergeRef(root, ref) {
+  return git(root, ['merge', '--squash', ref]);
+}
+
+function abortSquashMerge(root) {
+  return git(root, ['reset', '--merge']);
 }
 
 function unmergedFiles(root) {
@@ -339,6 +343,15 @@ function removeWorktree(root, worktreePath) {
   return true;
 }
 
+function deleteBranch(root, branch) {
+  const result = git(root, ['branch', '-D', branch]);
+  if (result.status !== 0) {
+    console.warn(result.stderr.trim() || result.stdout.trim() || `Failed to delete branch ${branch}`);
+    return false;
+  }
+  return true;
+}
+
 function commitAll(root, subject, body = '') {
   const status = gitStatusShort(root);
   if (!status) return false;
@@ -347,6 +360,17 @@ function commitAll(root, subject, body = '') {
   if (body) args.push('-m', body);
   gitRequire(root, args, 'git commit failed');
   return true;
+}
+
+function createSnapshotCommit(root, parentRef, subject, body = '') {
+  gitRequire(root, ['add', '-A'], 'git add failed');
+  const tree = gitRequire(root, ['write-tree'], 'git write-tree failed');
+  const parent = gitRef(root, parentRef);
+  const parentTree = gitRequire(root, ['rev-parse', `${parent}^{tree}`], 'failed to resolve parent tree');
+  if (tree === parentTree) return '';
+  const args = ['commit-tree', tree, '-p', parent, '-m', subject];
+  if (body) args.push('-m', body);
+  return gitRequire(root, args, 'git commit-tree failed');
 }
 
 function commandVersion(command, commandArgs) {
@@ -1080,6 +1104,21 @@ function outputPathFor(root, iteration, task) {
   return path.join(pathsFor(root).outDir, `${String(iteration).padStart(2, '0')}-${safeTask}-last-message.md`);
 }
 
+function pathFromWorktree(mainRoot, worktreePath, filePath) {
+  if (!filePath) return '';
+  const relativePath = path.relative(worktreePath, filePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) return filePath;
+  return path.join(mainRoot, relativePath);
+}
+
+function copyWorkerFileToMain(mainRoot, worktreePath, filePath) {
+  const mainPath = pathFromWorktree(mainRoot, worktreePath, filePath);
+  if (!filePath || mainPath === filePath || !fileExists(filePath)) return mainPath;
+  fs.mkdirSync(path.dirname(mainPath), { recursive: true });
+  fs.copyFileSync(filePath, mainPath);
+  return mainPath;
+}
+
 function buildTaskPrompt(root, task, context = {}) {
   const mode = context.mode || 'project';
   const queueDoc = queueLabelFor(mode);
@@ -1174,7 +1213,8 @@ Rules:
 2. Do not broaden product scope or run later queue tasks.
 3. Do not edit queue status unless it is required to resolve a conflict marker in the queue file.
 4. Leave a short note in docs/handoffs/${task.id}.md if the conflict resolution changes risk or validation.
-5. End with files changed and validation commands.
+5. Do not commit; the coordinator will create the single task completion commit after this resolves.
+6. End with files changed and validation commands.
 `;
 }
 
@@ -1932,14 +1972,13 @@ function updateParallelState(root, state, note = '') {
   writeParallelState(root, state);
 }
 
-function updateQueueStatuses(root, mode, updates, subject) {
+function updateQueueStatuses(root, mode, updates) {
   if (!updates.size) return false;
   const paths = pathsFor(root, mode);
   const current = readText(paths.queue);
   const next = updateQueueTaskStatuses(current, updates);
   if (next === current) return false;
   writeText(paths.queue, next);
-  commitAll(root, subject);
   return true;
 }
 
@@ -1953,7 +1992,7 @@ function syncAutoReadyTasks(root, mode) {
       updates.set(task.id, 'READY');
     }
   }
-  updateQueueStatuses(root, mode, updates, 'queue: unlock ready tasks');
+  updateQueueStatuses(root, mode, updates);
 }
 
 async function resolveMergeConflict(root, args, task, branch, mainRoot, iteration) {
@@ -1978,49 +2017,39 @@ async function resolveMergeConflict(root, args, task, branch, mainRoot, iteratio
   if (result.status !== 0 || unmergedFiles(root).length) {
     return false;
   }
-  commitAll(root, `queue: resolve merge conflict for ${task.id}`, `Merged branch: ${branch}`);
   return true;
 }
 
-async function mergeWithResolution(root, args, task, branch, mainRoot, iteration) {
-  const merge = mergeBranch(root, branch, `queue: merge ${task.id} ${task.title}`);
+async function mergeWithResolution(root, args, task, sourceRef, mainRoot, iteration) {
+  if (!sourceRef) return true;
+  const merge = squashMergeRef(root, sourceRef);
   if (merge.status === 0) return true;
   if (!unmergedFiles(root).length) {
-    throw new Error(merge.stderr.trim() || merge.stdout.trim() || `failed to merge ${branch}`);
+    throw new Error(merge.stderr.trim() || merge.stdout.trim() || `failed to merge ${sourceRef}`);
   }
-  const resolved = await resolveMergeConflict(root, args, task, branch, mainRoot, iteration);
+  const resolved = await resolveMergeConflict(root, args, task, sourceRef, mainRoot, iteration);
   if (resolved) return true;
-  git(root, ['merge', '--abort']);
+  const abort = abortSquashMerge(root);
+  if (abort.status !== 0) {
+    console.warn(abort.stderr.trim() || abort.stdout.trim() || 'failed to abort squash merge');
+  }
   return false;
 }
 
-async function prepareTaskWorktree(mainRoot, args, state, task, tasksById, iteration) {
+async function prepareTaskWorktree(mainRoot, state, task) {
   const worktreePath = path.join(state.worktreeRoot, branchSegment(task.id));
   const branch = `${state.branchPrefix}/${branchSegment(task.id)}`;
-  const dependencyBranches = task.dependencyIds
-    .map((id) => state.tasks[id]?.branch)
-    .filter(Boolean);
-  const startPoint = dependencyBranches.length === 1 ? dependencyBranches[0] : state.mainBranch;
+  const startPoint = state.mainBranch;
 
   addWorktree(mainRoot, worktreePath, branch, startPoint);
-
-  if (dependencyBranches.length > 1) {
-    for (const dependencyBranch of dependencyBranches) {
-      const dependencyTask = tasksById.get(Object.entries(state.tasks).find(([, info]) => info.branch === dependencyBranch)?.[0]) || task;
-      const merged = await mergeWithResolution(worktreePath, args, dependencyTask, dependencyBranch, mainRoot, iteration);
-      if (!merged) {
-        return { ok: false, worktreePath, branch, reason: `could not resolve merge conflict from ${dependencyBranch}` };
-      }
-    }
-  }
-
-  return { ok: true, worktreePath, branch };
+  const baseCommit = gitRef(worktreePath, 'HEAD');
+  return { ok: true, worktreePath, branch, baseCommit };
 }
 
-async function runParallelWorker(mainRoot, args, state, task, tasksById, iteration, context) {
+async function runParallelWorker(mainRoot, args, state, task, iteration, context) {
   let prepared;
   try {
-    prepared = await prepareTaskWorktree(mainRoot, args, state, task, tasksById, iteration);
+    prepared = await prepareTaskWorktree(mainRoot, state, task);
   } catch (error) {
     return { task, ok: false, reason: error.message, setupFailed: true };
   }
@@ -2028,7 +2057,7 @@ async function runParallelWorker(mainRoot, args, state, task, tasksById, iterati
     return { task, ok: false, reason: prepared.reason, branch: prepared.branch, worktreePath: prepared.worktreePath };
   }
 
-  const { branch, worktreePath } = prepared;
+  const { branch, worktreePath, baseCommit } = prepared;
   state.tasks[task.id] = {
     ...(state.tasks[task.id] || {}),
     status: 'RUNNING',
@@ -2037,24 +2066,23 @@ async function runParallelWorker(mainRoot, args, state, task, tasksById, iterati
     startedAt: new Date().toISOString(),
     dependencies: task.dependencyIds,
   };
-  updateParallelState(mainRoot, state, `started ${task.id}`);
-  commitAll(mainRoot, `queue: record ${task.id} started`);
 
   const prompt = buildParallelTaskPrompt(worktreePath, task, context);
   const beforeNativeSessions = snapshotNativeSessions();
-  const result = await runCodex(worktreePath, prompt, { ...args, outputRoot: mainRoot }, iteration, task);
+  const result = await runCodex(worktreePath, prompt, { ...args, outputRoot: worktreePath }, iteration, task);
   const nativeSession = findNewNativeSession(worktreePath, beforeNativeSessions);
+  const mainOutputPath = pathFromWorktree(mainRoot, worktreePath, result.outputPath);
   if (result.status !== 0) {
-    return { task, ok: false, status: result.status, reason: `Codex exited ${result.status}`, branch, worktreePath, outputPath: result.outputPath, nativeSession };
+    return { task, ok: false, status: result.status, reason: `Codex exited ${result.status}`, branch, worktreePath, outputPath: mainOutputPath, workerOutputPath: result.outputPath, nativeSession };
   }
 
-  commitAll(worktreePath, `queue: complete ${task.id} ${task.title.replace(new RegExp(`^${task.id}\\s+`), '').trim()}`.slice(0, 100), [
+  const snapshotRef = createSnapshotCommit(worktreePath, baseCommit, `queue: snapshot ${task.id} ${task.title.replace(new RegExp(`^${task.id}\\s+`), '').trim()}`.slice(0, 100), [
     `Task: ${task.title}`,
     '',
-    'Committed automatically by codex-task-queue parallel worker.',
+    'Temporary snapshot created by codex-task-queue parallel worker.',
   ].join('\n'));
 
-  return { task, ok: true, branch, worktreePath, outputPath: result.outputPath, nativeSession };
+  return { task, ok: true, branch, worktreePath, outputPath: mainOutputPath, workerOutputPath: result.outputPath, nativeSession, snapshotRef };
 }
 
 function printParallelDryRun(root, mode, maxParallel) {
@@ -2103,19 +2131,20 @@ async function runParallelQueue(args) {
     updatedAt: new Date().toISOString(),
     tasks: {},
   };
-  updateParallelState(root, state, 'parallel run started');
-  appendRunLog(root, { task: null, status: 'parallel-start', note: `run ${runId}; main ${mainBranch}; max ${args.maxParallel}` });
-  commitAll(root, `queue: start parallel run ${runId}`, `Base branch: ${baseBranch}\nBase commit: ${baseCommit}`);
 
   let completed = 0;
   let iteration = 0;
+  let startLogged = false;
   const active = new Map();
+  const appendParallelStartLog = () => {
+    if (startLogged) return;
+    appendRunLog(root, { task: null, status: 'parallel-start', note: `run ${runId}; main ${mainBranch}; max ${args.maxParallel}` });
+    startLogged = true;
+  };
 
   while (completed < args.max) {
-    syncAutoReadyTasks(root, mode);
     const queueText = readText(paths.queue);
     const tasks = parseQueueTasks(queueText);
-    const tasksById = new Map(tasks.map((task) => [task.id, task]));
     const statuses = taskStatusById(tasks);
     const runnable = tasks
       .filter((task) => !active.has(task.id))
@@ -2126,26 +2155,18 @@ async function runParallelQueue(args) {
       const activeTasks = [...active.values()].map((entry) => entry.task);
       const conflicting = activeTasks.find((activeTask) => taskPathConflict(task, activeTask, mode));
       if (conflicting) {
-        appendRunLog(root, {
-          task,
-          status: 'path-overlap-serialized',
-          note: `waiting for ${conflicting.id}; decoupling requires a narrow preprocessing task if this becomes a bottleneck`,
-        });
-        commitAll(root, `queue: record ${task.id} path overlap`);
+        console.log(`Delaying ${task.id} because its allowed paths overlap with active task ${conflicting.id}.`);
         continue;
       }
 
       iteration += 1;
-      updateQueueStatuses(root, mode, new Map([[task.id, 'RUNNING']]), `queue: mark ${task.id} running`);
-      const promise = runParallelWorker(root, args, state, task, tasksById, iteration, { mode, productPath: product.filePath });
+      const promise = runParallelWorker(root, args, state, task, iteration, { mode, productPath: product.filePath });
       active.set(task.id, { task, promise });
     }
 
     if (!active.size) {
       console.log('No runnable parallel tasks found. Queue is blocked or complete.');
       printExternalPrereqHint(externalPrereqBlockedTasks(tasks, statuses));
-      updateParallelState(root, state, 'no runnable tasks');
-      commitAll(root, 'queue: record parallel run idle');
       return;
     }
 
@@ -2160,6 +2181,9 @@ async function runParallelQueue(args) {
     }
 
     if (!result.ok) {
+      if (result.workerOutputPath && result.worktreePath) {
+        result.outputPath = copyWorkerFileToMain(root, result.worktreePath, result.workerOutputPath);
+      }
       state.tasks[result.task.id] = {
         ...(state.tasks[result.task.id] || {}),
         status: 'BLOCKED',
@@ -2168,13 +2192,15 @@ async function runParallelQueue(args) {
         blockedAt: new Date().toISOString(),
         reason: result.reason || `worker failed with ${result.status || 'unknown status'}`,
       };
+      appendParallelStartLog();
       updateParallelState(root, state, `blocked ${result.task.id}`);
       appendRunLog(root, { task: result.task, status: 'blocked', outputPath: result.outputPath || '', note: state.tasks[result.task.id].reason });
-      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]), `queue: block ${result.task.id}`);
+      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]));
+      commitAll(root, `queue: block ${result.task.id}`, `Task: ${result.task.title}\n\n${state.tasks[result.task.id].reason}`);
       continue;
     }
 
-    const merged = await mergeWithResolution(root, args, result.task, result.branch, root, iteration);
+    const merged = await mergeWithResolution(root, args, result.task, result.snapshotRef, root, iteration);
     if (!merged) {
       state.tasks[result.task.id] = {
         ...(state.tasks[result.task.id] || {}),
@@ -2184,9 +2210,11 @@ async function runParallelQueue(args) {
         blockedAt: new Date().toISOString(),
         reason: `could not resolve merge conflict from ${result.branch}`,
       };
+      appendParallelStartLog();
       updateParallelState(root, state, `merge blocked ${result.task.id}`);
       appendRunLog(root, { task: result.task, status: 'merge-blocked', outputPath: result.outputPath, note: state.tasks[result.task.id].reason });
-      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]), `queue: block ${result.task.id}`);
+      updateQueueStatuses(root, mode, new Map([[result.task.id, 'BLOCKED']]));
+      commitAll(root, `queue: block ${result.task.id}`, `Task: ${result.task.title}\n\n${state.tasks[result.task.id].reason}`);
       continue;
     }
 
@@ -2197,6 +2225,7 @@ async function runParallelQueue(args) {
       worktree: result.worktreePath,
       completedAt: new Date().toISOString(),
     };
+    appendParallelStartLog();
     updateParallelState(root, state, `completed ${result.task.id}`);
     appendRunLog(root, { task: result.task, status: 'completed', outputPath: result.outputPath, note: `branch ${result.branch}; worktree ${result.worktreePath}` });
     appendNativeSessionLog(root, {
@@ -2207,9 +2236,15 @@ async function runParallelQueue(args) {
       branch: result.branch,
       worktree: result.worktreePath,
     });
-    updateQueueStatuses(root, mode, new Map([[result.task.id, 'DONE']]), `queue: mark ${result.task.id} done`);
+    updateQueueStatuses(root, mode, new Map([[result.task.id, 'DONE']]));
     syncAutoReadyTasks(root, mode);
+    commitAll(root, `queue: complete ${result.task.id} ${result.task.title.replace(new RegExp(`^${result.task.id}\\s+`), '').trim()}`.slice(0, 100), [
+      `Task: ${result.task.title}`,
+      '',
+      'Committed automatically by codex-task-queue after the parallel task completed successfully.',
+    ].join('\n'));
     removeWorktree(root, result.worktreePath);
+    deleteBranch(root, result.branch);
     completed += 1;
   }
 
